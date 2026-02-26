@@ -13,6 +13,7 @@ import {
 } from "./api.js";
 import { submitBid } from "./bid.js";
 import { scheduleBid } from "./scheduler.js";
+import { runStrategy, getStrategies, getStrategy, cancelStrategy } from "./strategy.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -246,6 +247,75 @@ app.post("/api/bid/schedule", async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ─── Strategy ───
+app.get("/api/strategies", (_req, res) => {
+  res.json(getStrategies());
+});
+
+app.get("/api/strategy/:addr", (req, res) => {
+  const s = getStrategy(req.params.addr);
+  if (!s) {
+    res.status(404).json({ error: "No strategy for this auction" });
+    return;
+  }
+  res.json(s);
+});
+
+app.post("/api/strategy", async (req, res) => {
+  try {
+    const { auctionAddress, minFdvUsd, maxFdvUsd, amount } = req.body;
+    if (!auctionAddress || !minFdvUsd || !maxFdvUsd || !amount) {
+      res.status(400).json({ error: "Missing auctionAddress, minFdvUsd, maxFdvUsd, or amount" });
+      return;
+    }
+    const account = getAccount();
+
+    // Add to watch list if not already
+    if (!agent.watching.includes(auctionAddress)) {
+      agent.watching.push(auctionAddress);
+    }
+    agent.status = "armed";
+
+    // Run strategy in background
+    runStrategy({
+      bidder: account.address,
+      auctionAddress,
+      minFdvUsd: Number(minFdvUsd),
+      maxFdvUsd: Number(maxFdvUsd),
+      amount: Number(amount),
+    })
+      .then(() => {
+        agent.lastResult = {
+          type: "success",
+          message: `Strategy completed for ${auctionAddress.slice(0, 10)}`,
+          timestamp: Date.now(),
+        };
+        agent.status = agent.watching.length > 0 ? "watching" : "idle";
+      })
+      .catch((err) => {
+        agent.lastResult = {
+          type: "error",
+          message: err.message,
+          timestamp: Date.now(),
+        };
+        agent.status = agent.watching.length > 0 ? "watching" : "idle";
+      });
+
+    res.json({ status: "started", auctionAddress, minFdvUsd, maxFdvUsd, amount });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/strategy/:addr/cancel", (req, res) => {
+  const cancelled = cancelStrategy(req.params.addr);
+  if (!cancelled) {
+    res.status(404).json({ error: "No active strategy for this auction" });
+    return;
+  }
+  res.json({ status: "cancelled" });
 });
 
 const PORT = Number(process.env.PORT) || 3000;

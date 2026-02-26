@@ -573,8 +573,10 @@ async function runCmd(raw) {
           '  auctions           list all auctions          Cmd+L',
           '  watch <id>         watch auction (symbol, #, or addr)',
           '  unwatch            stop watching',
-          '  arm <fdv> <amt>    schedule bid for auction start',
-          '  disarm             cancel scheduled bid',
+          '  strategy <id> <min> <max> <amt>  reactive bid strategy',
+          '  strategies         show active strategies',
+          '  cancel <id>        cancel a strategy',
+          '  arm <fdv> <amt>    schedule fixed bid for start',
           '  bid <fdv> <amt>    bid now on watched auction',
           '  info <id>          one-shot auction lookup',
           '  status             show agent state            Cmd+J',
@@ -707,8 +709,73 @@ async function runCmd(raw) {
       }
 
       case 'disarm': {
-        // TODO: proper disarm via cancel endpoint
         print('disarmed (note: server-side scheduled bid may still execute)', 'warn');
+        break;
+      }
+
+      case 'strategy': {
+        // strategy <auction> <minFdv> <maxFdv> <amount>
+        const id = parts[1];
+        const minFdv = parts[2];
+        const maxFdv = parts[3];
+        const amt = parts[4];
+        if (!id || !minFdv || !maxFdv || !amt) {
+          print('usage: strategy <auction> <minFdv> <maxFdv> <amount>', 'err');
+          break;
+        }
+        const addr = await resolveAuction(id);
+        if (!addr) { print(`could not find auction: ${id}`, 'err'); break; }
+        const match = launchesCache.find(l => l.auction === addr);
+        print(`starting strategy on ${match ? match.tokenSymbol : shortAddr(addr)}...`, 'dim');
+        print(`  FDV range: $${fmtUsd(Number(minFdv))} → $${fmtUsd(Number(maxFdv))}`, 'dim');
+        print(`  Amount: ${amt} USDC`, 'dim');
+        const res = await fetch('/api/strategy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            auctionAddress: addr,
+            minFdvUsd: Number(minFdv),
+            maxFdvUsd: Number(maxFdv),
+            amount: Number(amt),
+          }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        print(`strategy active — agent will bid low and adjust up to $${fmtUsd(Number(maxFdv))} FDV`, 'ok');
+        if (!pollInterval) startPolling();
+        break;
+      }
+
+      case 'strategies': {
+        const res = await fetch('/api/strategies');
+        const strats = await res.json();
+        if (!Array.isArray(strats) || strats.length === 0) {
+          print('no active strategies', 'dim');
+          break;
+        }
+        strats.forEach(s => {
+          const match = launchesCache.find(l => l.auction === s.auctionAddress);
+          const name = match ? match.tokenSymbol : shortAddr(s.auctionAddress);
+          print(`  ${name}  ${s.status}  fdv: $${fmtUsd(s.currentFdv)}  bids: ${s.bidsPlaced}  total: ${s.totalBids}`, s.status === 'running' ? 'ok' : 'dim');
+          // Show last 3 log entries
+          s.log.slice(-3).forEach(l => {
+            const ago = Math.round((Date.now() - l.time) / 1000);
+            print(`    ${l.message} (${ago}s ago)`, l.type === 'error' ? 'err' : l.type === 'bid' ? 'ok' : 'dim');
+          });
+        });
+        break;
+      }
+
+      case 'cancel': {
+        const id = parts[1];
+        if (!id) { print('usage: cancel <auction>', 'err'); break; }
+        const addr = await resolveAuction(id);
+        if (!addr) { print(`could not find auction: ${id}`, 'err'); break; }
+        const res = await fetch(`/api/strategy/${addr}/cancel`, { method: 'POST' });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        const match = launchesCache.find(l => l.auction === addr);
+        print(`cancelled strategy on ${match ? match.tokenSymbol : shortAddr(addr)}`, 'dim');
         break;
       }
 
