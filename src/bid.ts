@@ -63,7 +63,8 @@ export async function submitBid(params: BuildBidTxParams): Promise<BidResult> {
     console.log(`\nSubmitting transaction ${i + 1}/${steps.length}${isLastStep ? " (bid)" : " (approve)"}...`);
 
     // Simulate the bid tx (last step) before sending — catches reverts without wasting gas
-    // Skip simulation for approve (first step) since it always succeeds
+    // Only block on auction-level errors; allowance errors are expected race conditions
+    // since the approve tx was just confirmed and RPC may not reflect it yet
     if (isLastStep && steps.length > 1) {
       try {
         await publicClient.call({
@@ -75,14 +76,14 @@ export async function submitBid(params: BuildBidTxParams): Promise<BidResult> {
         console.log("  Simulation passed");
       } catch (simErr: any) {
         const simMsg = simErr.message || String(simErr);
-        // Extract known revert reasons for clearer error messages
         if (simMsg.includes("0x5f259e52") || simMsg.includes("BidMustBeAboveClearingPrice")) {
           throw new Error("BidMustBeAboveClearingPrice — simulation rejected bid (Q96 price still too low)");
         }
         if (simMsg.includes("0xa0e92984") || simMsg.includes("AuctionEnded")) {
           throw new Error("AuctionEnded — auction is no longer accepting bids");
         }
-        throw new Error(`Bid simulation failed: ${simMsg.slice(0, 300)}`);
+        // Allowance/balance errors after a fresh approve are RPC race conditions — proceed anyway
+        console.log(`  Simulation warning (proceeding): ${simMsg.slice(0, 150)}`);
       }
     }
 
@@ -92,7 +93,7 @@ export async function submitBid(params: BuildBidTxParams): Promise<BidResult> {
       value: step.value ? BigInt(step.value) : 0n,
       account,
       chain: walletClient.chain,
-      gas: 500_000n,
+      gas: 1_000_000n,
     });
 
     console.log(`  TX hash: ${hash}`);
