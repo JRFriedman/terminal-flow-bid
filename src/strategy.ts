@@ -150,19 +150,21 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
     addLog(state, "Auction started — placing initial bid", "info");
 
     // Fetch initial auction state to bid above clearing
-    let initialFdv = minFdvUsd;
+    // Contract requires strictly above clearing/floor — always add a buffer
+    let initialFdv = Math.ceil(minFdvUsd * 1.01); // At least 1% above floor
     try {
       const auctionInfo = await getAuction(auctionAddress);
       const clearingQ96 = parseFloat((auctionInfo as any).clearingPrice || "0");
       if (clearingQ96 > 0) {
         const impliedFdv = q96ToFdv(clearingQ96, auctionInfo);
-        if (impliedFdv > initialFdv) {
+        if (impliedFdv >= initialFdv) {
           // Bid 15% above clearing to ensure acceptance
-          initialFdv = Math.min(Math.ceil(impliedFdv * 1.15), maxFdvUsd);
+          initialFdv = Math.ceil(impliedFdv * 1.15);
           addLog(state, `Clearing FDV is $${Math.round(impliedFdv)}, bidding at $${initialFdv}`, "info");
         }
       }
     } catch {}
+    initialFdv = Math.min(initialFdv, maxFdvUsd);
 
     // Initial bid — don't die if it fails
     const initialOk = await placeBid(state, { bidder, auctionAddress, maxFdvUsd: initialFdv, amount });
