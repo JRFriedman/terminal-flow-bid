@@ -4,6 +4,7 @@ import {
   getCurrentBlock,
   type BuildBidTxParams,
   type AuctionBid,
+  type AuctionInfo,
 } from "./api.js";
 import { submitBid } from "./bid.js";
 import { formatCountdown } from "./utils.js";
@@ -22,6 +23,7 @@ export interface StrategyState {
   auctionAddress: string;
   status: "waiting" | "running" | "done" | "failed";
   currentFdv: number;
+  impliedFdv: number;
   bidsPlaced: number;
   lastBidFdv: number | null;
   clearingPrice: string | null;
@@ -68,6 +70,7 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
     auctionAddress,
     status: "waiting",
     currentFdv: minFdvUsd,
+    impliedFdv: 0,
     bidsPlaced: 0,
     lastBidFdv: null,
     clearingPrice: null,
@@ -145,11 +148,18 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
           }
 
           const blocksLeft = endBlock - currentBlock.blockNumber;
-          state.totalBids = Array.isArray(bids) ? bids.length : 0;
+          const bidList = Array.isArray(bids) ? bids : (bids as any).bids || [];
+          state.totalBids = bidList.length;
           state.clearingPrice = (auctionInfo as any).clearingPrice || null;
 
+          // Track implied FDV from clearing price
+          const clearingQ96 = parseFloat((auctionInfo as any).clearingPrice || "0");
+          if (clearingQ96 > 0) {
+            state.impliedFdv = Math.round(q96ToFdv(clearingQ96, auctionInfo));
+          }
+
           // Decide whether to adjust
-          const newFdv = calculateAdjustment(state, bids, auctionInfo, {
+          const newFdv = calculateAdjustment(state, bidList, auctionInfo, {
             minFdvUsd,
             maxFdvUsd,
             blocksLeft,
@@ -196,6 +206,35 @@ interface AdjustmentContext {
   auctionDuration: number;
 }
 
+/**
+ * Convert a Q96 price to implied FDV in USD.
+ *
+ * The Q96 clearing/floor prices are linearly proportional to token price.
+ * We derive the conversion factor from the floor price and the minimum raise:
+ *   floor_FDV = (requiredCurrencyRaised / auctionAmount) * totalSupply
+ *   implied_FDV = clearingPrice * (floor_FDV / floorPrice)
+ */
+function q96ToFdv(q96Price: number, auctionInfo: any): number {
+  const floorPrice = parseFloat(auctionInfo.floorPrice || "0");
+  if (floorPrice <= 0) return 0;
+
+  const requiredRaised = parseFloat(auctionInfo.requiredCurrencyRaised || "0");
+  const auctionAmount = parseFloat(auctionInfo.auctionAmount || "0");
+  const totalSupply = parseFloat(auctionInfo.totalSupply || "0");
+  const tokenDecimals = parseInt(auctionInfo.tokenDecimals || "18");
+  const currencyDecimals = 6; // USDC
+
+  if (auctionAmount <= 0 || totalSupply <= 0 || requiredRaised <= 0) return 0;
+
+  // Convert to human-readable units
+  const requiredRaisedHuman = requiredRaised / 10 ** currencyDecimals;
+  const auctionAmountHuman = auctionAmount / 10 ** tokenDecimals;
+  const totalSupplyHuman = totalSupply / 10 ** tokenDecimals;
+
+  const floorFdv = (requiredRaisedHuman / auctionAmountHuman) * totalSupplyHuman;
+  return q96Price * (floorFdv / floorPrice);
+}
+
 function calculateAdjustment(
   state: StrategyState,
   bids: AuctionBid[],
@@ -205,19 +244,11 @@ function calculateAdjustment(
   // Already at max
   if (state.currentFdv >= ctx.maxFdvUsd) return null;
 
-  // Need at least some bids to react to
-  const bidList = Array.isArray(bids) ? bids : [];
-  if (bidList.length === 0) return null;
-
   // Check clearing price — if it's above our current bid, we need to adjust
-  const clearingPrice = parseFloat(auctionInfo.clearingPrice || "0");
-  if (clearingPrice <= 0) return null;
+  const clearingPriceQ96 = parseFloat(auctionInfo.clearingPrice || "0");
+  if (clearingPriceQ96 <= 0) return null;
 
-  // Estimate the implied FDV from the clearing price
-  // clearingPrice is in Q96 format from the contract, but the API may normalize it
-  // We'll use whatever FDV the API provides
-  const impliedFdv = parseFloat(auctionInfo.fdv || auctionInfo.impliedFdv || "0");
-
+  const impliedFdv = q96ToFdv(clearingPriceQ96, auctionInfo);
   if (impliedFdv <= 0 || impliedFdv <= state.currentFdv) return null;
 
   // The clearing FDV is above our current bid — adjust up
