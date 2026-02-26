@@ -1373,9 +1373,13 @@ async function boot() {
 // Auth check → boot
 checkAuth().then(ok => { if (ok) boot(); });
 
-// Keep focus on CLI input — click anywhere to refocus
-document.addEventListener('click', () => $cli.focus());
+// Keep focus on CLI input — click anywhere to refocus (skip if login overlay is visible)
+document.addEventListener('click', () => {
+  if (!document.getElementById('login-overlay').classList.contains('hidden')) return;
+  $cli.focus();
+});
 document.addEventListener('keydown', (e) => {
+  if (!document.getElementById('login-overlay').classList.contains('hidden')) return;
   if (document.activeElement !== $cli) {
     $cli.focus();
   }
