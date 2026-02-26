@@ -773,6 +773,9 @@ async function runCmd(raw) {
           '',
           '  launch <name> <symbol>  launch a new token',
           '',
+          '  claim <id>         claim/exit a bid',
+          '  claim-all          claim all claimable bids',
+          '',
           '  status             show agent state            Cmd+J',
           '  bids               show your bid history       Cmd+B',
           '  wallet             show wallet info            Cmd+W',
@@ -1092,6 +1095,52 @@ async function runCmd(raw) {
         if (ecData.error) throw new Error(ecData.error);
         const ecMatch = launchesCache.find(l => l.auction === ecAddr);
         print(`cancelled exit strategy on ${ecMatch ? ecMatch.tokenSymbol : shortAddr(ecAddr)}`, 'dim');
+        break;
+      }
+
+      case 'claim': {
+        const claimId = parts[1];
+        if (!claimId) { print('usage: claim <auction> or claim-all', 'err'); break; }
+        const claimAddr = await resolveAuction(claimId);
+        if (!claimAddr) { print(`could not find auction: ${claimId}`, 'err'); break; }
+        print('claiming...', 'dim');
+        const claimRes = await fetch('/api/claim', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ auctionAddress: claimAddr }),
+        });
+        const claimData = await claimRes.json();
+        if (claimData.error) throw new Error(claimData.error);
+        const claimMatch = launchesCache.find(l => l.auction === claimAddr);
+        print(`claimed ${claimMatch ? claimMatch.tokenSymbol : shortAddr(claimAddr)} (${claimData.method})`, 'ok');
+        if (claimData.note) print(`  ${claimData.note}`, 'dim');
+        if (claimData.txHash) {
+          printHtml(`  tx: <a href="https://basescan.org/tx/${claimData.txHash}" target="_blank" style="color:var(--cyan)">${claimData.txHash.slice(0, 10)}...${claimData.txHash.slice(-8)}</a>`);
+        }
+        break;
+      }
+
+      case 'claim-all': {
+        print('claiming all...', 'dim');
+        const caRes = await fetch('/api/claim-all', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const caData = await caRes.json();
+        if (caData.error) throw new Error(caData.error);
+        if (caData.status === 'nothing_to_claim') { print('no claimable bids found', 'dim'); break; }
+        for (const c of caData.claimed || []) {
+          const m = launchesCache.find(l => l.auction === c.auction);
+          print(`  claimed ${m ? m.tokenSymbol : shortAddr(c.auction)} (${c.method})`, 'ok');
+          if (c.txHash) {
+            printHtml(`    tx: <a href="https://basescan.org/tx/${c.txHash}" target="_blank" style="color:var(--cyan)">${c.txHash.slice(0, 10)}...${c.txHash.slice(-8)}</a>`);
+          }
+        }
+        for (const e of caData.errors || []) {
+          const m = launchesCache.find(l => l.auction === e.auction);
+          print(`  failed ${m ? m.tokenSymbol : shortAddr(e.auction)}: ${e.error.slice(0, 80)}`, 'err');
+        }
+        print(`done: ${(caData.claimed || []).length} claimed, ${(caData.errors || []).length} errors`, 'dim');
         break;
       }
 

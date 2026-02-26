@@ -157,6 +157,37 @@ export interface BuildLaunchTxResult {
   };
 }
 
+// --- Claims ---
+
+export interface BuildClaimTxParams {
+  auctionAddress: string;
+  claimer: string;
+  bidId: string;
+}
+
+export interface BuildClaimTxResult {
+  transaction: {
+    description: string;
+    to: string;
+    data: string;
+    value: string;
+  };
+  params: {
+    auctionAddress: string;
+    bidId: string;
+    claimMethod: string;
+    isGraduated: boolean;
+  };
+  note?: string;
+}
+
+export async function buildClaimTx(params: BuildClaimTxParams): Promise<BuildClaimTxResult> {
+  return fetchJson<BuildClaimTxResult>("/claims/build-tx", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+}
+
 export async function buildLaunchTx(params: BuildLaunchTxParams): Promise<BuildLaunchTxResult> {
   return fetchJson<BuildLaunchTxResult>("/launches/build-tx", {
     method: "POST",

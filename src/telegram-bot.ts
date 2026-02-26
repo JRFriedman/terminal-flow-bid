@@ -106,7 +106,7 @@ export function startTelegramBot(): void {
   }
 
   // Commands that take arguments
-  for (const cmd of ["watch", "unwatch", "info", "arm", "disarm", "bid", "strategy", "cancel", "exit", "exit-cancel", "launch"]) {
+  for (const cmd of ["watch", "unwatch", "info", "arm", "disarm", "bid", "strategy", "cancel", "exit", "exit-cancel", "launch", "claim", "claim-all"]) {
     bot.command(cmd.replace("-", "_"), async (ctx) => {
       try {
         const args = ctx.match ? `${cmd} ${ctx.match}` : cmd;
@@ -181,6 +181,8 @@ async function handleCommand(raw: string): Promise<string> {
         "`exit <id> [profile] [sl]` — exit strategy",
         "`exits` — list exit strategies",
         "`launch <name> <symbol>` — launch token",
+        "`claim <id>` — claim/exit a bid",
+        "`claim-all` — claim all claimable bids",
         "`status` — agent state",
         "`wallet` — wallet balances",
         "`info <id>` — auction details",
@@ -467,6 +469,37 @@ async function handleCommand(raw: string): Promise<string> {
           `*${name}* ${e.profileName} ${e.status.toUpperCase()} — ${e.currentMultiple.toFixed(2)}x — realized: ${fmtUsd(e.totalUsdcRealized)}`
         );
       });
+      return lines.join("\n");
+    }
+
+    case "claim": {
+      const claimInput = parts[1];
+      if (!claimInput) return "Usage: `claim <auction>` or `claim-all`";
+      const claimAddr = await resolveAuction(claimInput);
+      if (!claimAddr) return `Could not find auction: ${claimInput}`;
+      const claimData = await api("/api/claim", "POST", { auctionAddress: claimAddr });
+      if (claimData.error) throw new Error(claimData.error);
+      const claimMatch = launchesCache.find((l: any) => l.auction === claimAddr);
+      let msg = `\u2705 Claimed *${claimMatch ? claimMatch.tokenSymbol : shortAddr(claimAddr)}*`;
+      msg += `\nMethod: ${claimData.method}`;
+      if (claimData.note) msg += `\n${claimData.note}`;
+      if (claimData.txHash) msg += `\n[tx](https://basescan.org/tx/${claimData.txHash})`;
+      return msg;
+    }
+
+    case "claim-all": {
+      const caData = await api("/api/claim-all", "POST");
+      if (caData.error) throw new Error(caData.error);
+      if (caData.status === "nothing_to_claim") return "No claimable bids found.";
+      const lines: string[] = ["*Claim Results*", ""];
+      for (const c of caData.claimed || []) {
+        const m = launchesCache.find((l: any) => l.auction === c.auction);
+        lines.push(`\u2705 ${m ? m.tokenSymbol : shortAddr(c.auction)} — ${c.method}`);
+      }
+      for (const e of caData.errors || []) {
+        const m = launchesCache.find((l: any) => l.auction === e.auction);
+        lines.push(`\u274C ${m ? m.tokenSymbol : shortAddr(e.auction)} — ${e.error.slice(0, 80)}`);
+      }
       return lines.join("\n");
     }
 

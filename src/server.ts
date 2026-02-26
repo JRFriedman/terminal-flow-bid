@@ -18,6 +18,7 @@ import {
   getUserBids,
   getLaunches,
   buildLaunchTx,
+  buildClaimTx,
 } from "./api.js";
 import { submitBid } from "./bid.js";
 import { scheduleBid } from "./scheduler.js";
@@ -585,6 +586,113 @@ app.post("/api/exit-strategy/:addr/cancel", (req, res) => {
     return;
   }
   res.json({ status: "cancelled" });
+});
+
+// ─── Claims ───
+app.post("/api/claim", async (req, res) => {
+  try {
+    const { auctionAddress, bidId } = req.body;
+    if (!auctionAddress) {
+      res.status(400).json({ error: "Missing auctionAddress" });
+      return;
+    }
+    const account = getAccount();
+    const publicClient = getPublicClient();
+    const walletClient = (await import("./config.js")).getWalletClient();
+
+    const result = await buildClaimTx({
+      auctionAddress,
+      claimer: account.address,
+      bidId: bidId || "0",
+    });
+
+    console.log(`[claim] ${result.transaction.description}`);
+
+    const hash = await walletClient.sendTransaction({
+      to: result.transaction.to as `0x${string}`,
+      data: result.transaction.data as `0x${string}`,
+      value: result.transaction.value ? BigInt(result.transaction.value) : 0n,
+      account,
+      chain: walletClient.chain,
+      gas: 1_000_000n,
+    });
+
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    if (receipt.status === "reverted") {
+      throw new Error(`Claim transaction reverted: ${hash}`);
+    }
+
+    res.json({
+      status: "claimed",
+      txHash: hash,
+      method: result.params.claimMethod,
+      graduated: result.params.isGraduated,
+      note: result.note,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/claim-all", async (req, res) => {
+  try {
+    const account = getAccount();
+    const publicClient = getPublicClient();
+    const walletClient = (await import("./config.js")).getWalletClient();
+
+    const userBids = await getUserBids(account.address);
+    const claimable = (userBids as any[]).filter(
+      (b) => !b.hasClaimedTokens && !b.hasExited && b.isFilled
+    );
+
+    if (claimable.length === 0) {
+      res.json({ status: "nothing_to_claim", claimed: [] });
+      return;
+    }
+
+    const claimed: Array<{ auction: string; txHash: string; method: string; note?: string }> = [];
+    const errors: Array<{ auction: string; error: string }> = [];
+
+    for (const bid of claimable) {
+      try {
+        const result = await buildClaimTx({
+          auctionAddress: bid.auction,
+          claimer: account.address,
+          bidId: bid.bidId || "0",
+        });
+
+        console.log(`[claim-all] ${bid.auction}: ${result.transaction.description}`);
+
+        const hash = await walletClient.sendTransaction({
+          to: result.transaction.to as `0x${string}`,
+          data: result.transaction.data as `0x${string}`,
+          value: result.transaction.value ? BigInt(result.transaction.value) : 0n,
+          account,
+          chain: walletClient.chain,
+          gas: 1_000_000n,
+        });
+
+        const receipt = await publicClient.waitForTransactionReceipt({ hash });
+        if (receipt.status === "reverted") {
+          errors.push({ auction: bid.auction, error: `Reverted: ${hash}` });
+          continue;
+        }
+
+        claimed.push({
+          auction: bid.auction,
+          txHash: hash,
+          method: result.params.claimMethod,
+          note: result.note,
+        });
+      } catch (err: any) {
+        errors.push({ auction: bid.auction, error: err.message });
+      }
+    }
+
+    res.json({ status: "done", claimed, errors });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── Token price ───
