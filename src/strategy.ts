@@ -31,6 +31,8 @@ export interface StrategyState {
   auctionAddress: string;
   status: "waiting" | "running" | "done" | "failed";
   amount: number;
+  minFdvUsd: number;
+  maxFdvUsd: number;
   currentFdv: number;
   impliedFdv: number;
   bidsPlaced: number;
@@ -95,6 +97,8 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
     auctionAddress,
     status: "waiting",
     amount,
+    minFdvUsd,
+    maxFdvUsd,
     currentFdv: minFdvUsd,
     impliedFdv: 0,
     bidsPlaced: 0,

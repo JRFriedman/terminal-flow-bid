@@ -543,6 +543,8 @@ function renderOneMonitor(addr, info, bids, block) {
   if (strategy) {
     h += `<div class="stats-row">`;
     h += `<span style="color:var(--green)"><span class="label">strategy</span> ${strategy.status}</span>`;
+    h += `<span><span class="label">range</span> ${fmtUsd(strategy.minFdvUsd || 0)} – ${fmtUsd(strategy.maxFdvUsd || 0)}</span>`;
+    h += `<span><span class="label">amount</span> ${strategy.amount} USDC</span>`;
     h += `<span><span class="label">bid fdv</span> ${fmtUsd(strategy.currentFdv)}</span>`;
     if (strategy.impliedFdv) h += `<span><span class="label">market fdv</span> ${fmtUsd(strategy.impliedFdv)}</span>`;
     h += `<span><span class="label">bids placed</span> ${strategy.bidsPlaced}</span>`;
