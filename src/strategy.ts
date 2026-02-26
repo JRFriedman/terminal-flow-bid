@@ -8,6 +8,7 @@ import {
 } from "./api.js";
 import { submitBid } from "./bid.js";
 import { formatCountdown } from "./utils.js";
+import { markDirty, registerCollector } from "./persistence.js";
 
 const POLL_INTERVAL_MS = 4000; // Check every 4 seconds (~2 blocks)
 
@@ -18,6 +19,7 @@ export interface StrategyParams {
   maxFdvUsd: number;
   amount: number;
   exitProfile?: string; // "conservative", "moderate", "aggressive", or custom "50@3x,50@5x"
+  stopLoss?: number;
 }
 
 export interface StrategyState {
@@ -30,6 +32,7 @@ export interface StrategyState {
   clearingPrice: string | null;
   totalBids: number;
   exitProfile?: string;
+  stopLoss?: number;
   log: Array<{ time: number; message: string; type: "info" | "bid" | "error" }>;
 }
 
@@ -49,10 +52,24 @@ export function cancelStrategy(auctionAddress: string): boolean {
   if (s && (s.status === "waiting" || s.status === "running")) {
     s.status = "done";
     addLog(s, "Strategy cancelled", "info");
+    markDirty();
     return true;
   }
   return false;
 }
+
+/** Restore strategies from persisted state */
+export function setStrategies(states: StrategyState[]): void {
+  for (const s of states) {
+    strategies.set(s.auctionAddress, s);
+  }
+}
+
+// Register persistence collector
+registerCollector(() => ({
+  section: "Bid Strategies",
+  data: Array.from(strategies.values()),
+}));
 
 function addLog(
   state: StrategyState,
@@ -66,7 +83,7 @@ function addLog(
 }
 
 export async function runStrategy(params: StrategyParams): Promise<void> {
-  const { bidder, auctionAddress, minFdvUsd, maxFdvUsd, amount, exitProfile } = params;
+  const { bidder, auctionAddress, minFdvUsd, maxFdvUsd, amount, exitProfile, stopLoss } = params;
 
   const state: StrategyState = {
     auctionAddress,
@@ -78,9 +95,11 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
     clearingPrice: null,
     totalBids: 0,
     exitProfile,
+    stopLoss,
     log: [],
   };
   strategies.set(auctionAddress, state);
+  markDirty();
 
   addLog(state, `Strategy started: ${amount} USDC, FDV range $${minFdvUsd} - $${maxFdvUsd}`, "info");
 
@@ -120,6 +139,7 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
     if (state.status === "done") return; // Cancelled while waiting
 
     state.status = "running";
+    markDirty();
     addLog(state, "Auction started — placing initial bid", "info");
 
     // Place initial bid at minFdv
@@ -145,6 +165,7 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
           if (currentBlock.blockNumber >= endBlock) {
             addLog(state, "Auction ended", "info");
             state.status = "done";
+            markDirty();
             clearInterval(interval);
             resolve();
             return;
@@ -181,6 +202,7 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
   } catch (err: any) {
     state.status = "failed";
     addLog(state, `Strategy failed: ${err.message}`, "error");
+    markDirty();
     throw err;
   }
 }

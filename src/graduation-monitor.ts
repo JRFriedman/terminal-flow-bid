@@ -7,11 +7,27 @@ import {
   getExitStrategy,
   type ExitProfileName,
 } from "./exit-strategy.js";
+import { markDirty, registerCollector } from "./persistence.js";
 
 const POLL_INTERVAL_MS = 60_000; // Check every 60 seconds
 
 // Track which auctions we've already processed
 const processedGraduations = new Set<string>();
+
+/** Restore processed graduations from persisted state */
+export function setProcessedGraduations(addrs: string[]): void {
+  for (const a of addrs) processedGraduations.add(a);
+}
+
+export function getProcessedGraduations(): string[] {
+  return Array.from(processedGraduations);
+}
+
+// Register persistence collector
+registerCollector(() => ({
+  section: "Processed Graduations",
+  data: Array.from(processedGraduations),
+}));
 
 /**
  * Start the graduation monitor background loop.
@@ -54,6 +70,7 @@ async function checkGraduations(): Promise<void> {
     // Already have an exit strategy running?
     if (getExitStrategy(strategy.auctionAddress)) {
       processedGraduations.add(strategy.auctionAddress);
+      markDirty();
       continue;
     }
 
@@ -61,6 +78,7 @@ async function checkGraduations(): Promise<void> {
       `[graduation-monitor] ${launch.tokenSymbol} graduated! Starting exit strategy...`
     );
     processedGraduations.add(strategy.auctionAddress);
+    markDirty();
 
     try {
       await startExitFromGraduation(strategy, launch);
@@ -106,6 +124,7 @@ async function startExitFromGraduation(
   }
 
   const exitProfile = (strategy as any).exitProfile as string;
+  const stopLoss = strategy.stopLoss;
 
   // Run exit strategy in background
   runExitStrategy({
@@ -116,6 +135,7 @@ async function startExitFromGraduation(
     entryFdv,
     tokenBalance,
     profileOrCustom: exitProfile,
+    stopLossMultiple: stopLoss,
   }).catch((err) => {
     console.error(
       `[graduation-monitor] Exit strategy error for ${launch.tokenSymbol}: ${err.message}`

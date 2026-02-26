@@ -22,7 +22,10 @@ import {
   resolveTranches,
 } from "./exit-strategy.js";
 import { getTokenPrice } from "./swap.js";
-import { startGraduationMonitor } from "./graduation-monitor.js";
+import { startGraduationMonitor, setProcessedGraduations } from "./graduation-monitor.js";
+import { loadState, markDirty, registerCollector } from "./persistence.js";
+import { setExitStrategies, resumeExitStrategies } from "./exit-strategy.js";
+import { setStrategies } from "./strategy.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -57,6 +60,16 @@ const agent: AgentState = {
   lastResult: null,
 };
 
+// Register agent state for persistence
+registerCollector(() => ({
+  section: "Agent",
+  data: {
+    watching: agent.watching,
+    status: agent.status,
+    armedBids: agent.armedBids,
+  },
+}));
+
 // GET /api/agent — current agent state
 app.get("/api/agent", (_req, res) => {
   res.json(agent);
@@ -73,6 +86,7 @@ app.post("/api/agent/watch", (req, res) => {
     agent.watching.push(auctionAddress);
   }
   if (agent.status === "idle") agent.status = "watching";
+  markDirty();
   res.json(agent);
 });
 
@@ -91,6 +105,7 @@ app.post("/api/agent/unwatch", (req, res) => {
     agent.armedBids = [];
     agent.status = "idle";
   }
+  markDirty();
   res.json(agent);
 });
 
@@ -105,6 +120,7 @@ app.post("/api/agent/disarm", (req, res) => {
   if (agent.armedBids.length === 0 && agent.status === "armed") {
     agent.status = agent.watching.length > 0 ? "watching" : "idle";
   }
+  markDirty();
   res.json(agent);
 });
 
@@ -288,7 +304,7 @@ app.get("/api/strategy/:addr", (req, res) => {
 
 app.post("/api/strategy", async (req, res) => {
   try {
-    const { auctionAddress, minFdvUsd, maxFdvUsd, amount, exitProfile } = req.body;
+    const { auctionAddress, minFdvUsd, maxFdvUsd, amount, exitProfile, stopLoss } = req.body;
     if (!auctionAddress || !minFdvUsd || !maxFdvUsd || !amount) {
       res.status(400).json({ error: "Missing auctionAddress, minFdvUsd, maxFdvUsd, or amount" });
       return;
@@ -309,6 +325,7 @@ app.post("/api/strategy", async (req, res) => {
       maxFdvUsd: Number(maxFdvUsd),
       amount: Number(amount),
       exitProfile: exitProfile || undefined,
+      stopLoss: stopLoss != null ? Number(stopLoss) : undefined,
     })
       .then(() => {
         agent.lastResult = {
@@ -358,12 +375,13 @@ app.get("/api/exit-strategy/:addr", (req, res) => {
 
 app.post("/api/exit-strategy", async (req, res) => {
   try {
-    const { auctionAddress, profileOrCustom } = req.body;
+    const { auctionAddress, profileOrCustom, stopLoss } = req.body;
     if (!auctionAddress) {
       res.status(400).json({ error: "Missing auctionAddress" });
       return;
     }
     const profile = profileOrCustom || "moderate";
+    const stopLossMultiple = stopLoss != null ? Number(stopLoss) : undefined;
 
     // Validate profile
     try {
@@ -433,6 +451,7 @@ app.post("/api/exit-strategy", async (req, res) => {
       entryFdv,
       tokenBalance,
       profileOrCustom: profile,
+      stopLossMultiple,
     }).catch((err) => {
       console.error("Exit strategy error:", err.message);
     });
@@ -443,6 +462,7 @@ app.post("/api/exit-strategy", async (req, res) => {
       profile,
       entryFdv: Math.round(entryFdv),
       tokenBalance: tokenBalance.toString(),
+      stopLoss: stopLossMultiple,
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -468,8 +488,48 @@ app.get("/api/token/:addr/price", async (req, res) => {
   }
 });
 
+// ─── Boot: restore state and start ───
 const PORT = Number(process.env.PORT) || 3000;
-app.listen(PORT, () => {
+
+// Load persisted state before starting
+const savedState = loadState();
+
+if (savedState["Agent"]) {
+  const a = savedState["Agent"] as any;
+  if (Array.isArray(a.watching)) agent.watching = a.watching;
+  if (a.status) agent.status = a.status;
+  if (Array.isArray(a.armedBids)) agent.armedBids = a.armedBids;
+  console.log(`[boot] Restored agent: watching ${agent.watching.length} auctions, status=${agent.status}`);
+}
+
+if (savedState["Bid Strategies"]) {
+  const strats = savedState["Bid Strategies"] as any[];
+  if (Array.isArray(strats)) {
+    setStrategies(strats);
+    console.log(`[boot] Restored ${strats.length} bid strategies`);
+  }
+}
+
+if (savedState["Exit Strategies"]) {
+  const exits = savedState["Exit Strategies"] as any[];
+  if (Array.isArray(exits)) {
+    setExitStrategies(exits);
+    const running = exits.filter((e) => e.status === "running").length;
+    console.log(`[boot] Restored ${exits.length} exit strategies (${running} running)`);
+  }
+}
+
+if (savedState["Processed Graduations"]) {
+  const grads = savedState["Processed Graduations"] as string[];
+  if (Array.isArray(grads)) {
+    setProcessedGraduations(grads);
+    console.log(`[boot] Restored ${grads.length} processed graduations`);
+  }
+}
+
+app.listen(PORT, "127.0.0.1", () => {
   console.log(`terminal.flow.bid running on http://localhost:${PORT}`);
   startGraduationMonitor();
+  // Resume running exit strategies after load
+  resumeExitStrategies();
 });

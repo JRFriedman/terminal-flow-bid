@@ -2,6 +2,7 @@ import { type Address, type Hash, erc20Abi } from "viem";
 import { getPublicClient, getAccount, USDC_BASE } from "./config.js";
 import { getTokenPrice, swapExactInputSingle } from "./swap.js";
 import { baseScanTxUrl } from "./utils.js";
+import { markDirty, registerCollector } from "./persistence.js";
 
 const POLL_INTERVAL_MS = 30_000; // Check price every 30 seconds
 
@@ -35,9 +36,10 @@ export interface ExitStrategyState {
   profileName: ExitProfileName;
   tranches: ExecutedTranche[];
   totalUsdcRealized: number;
-  status: "running" | "done" | "failed" | "cancelled";
+  status: "running" | "done" | "failed" | "cancelled" | "stopped";
   log: Array<{ time: number; message: string; type: "info" | "sell" | "error" }>;
   uniswapFee: number;
+  stopLossMultiple?: number;
 }
 
 // ─── Preset profiles (dynamic — just shortcuts) ───
@@ -102,10 +104,40 @@ export function cancelExitStrategy(auctionAddress: string): boolean {
   if (s && s.status === "running") {
     s.status = "cancelled";
     addLog(s, "Exit strategy cancelled", "info");
+    markDirty();
     return true;
   }
   return false;
 }
+
+/** Restore exit strategies from persisted state */
+export function setExitStrategies(states: ExitStrategyState[]): void {
+  for (const s of states) {
+    exitStrategies.set(s.auctionAddress, s);
+  }
+}
+
+/** Resume polling for strategies that were running when server stopped */
+export function resumeExitStrategies(): void {
+  for (const state of exitStrategies.values()) {
+    if (state.status === "running") {
+      console.log(`[exit:${state.auctionAddress.slice(0, 8)}] Resuming exit strategy`);
+      pollAndExecute(state).catch((err: any) => {
+        if (state.status === "running") {
+          state.status = "failed";
+          addLog(state, `Exit strategy failed on resume: ${err.message}`, "error");
+          markDirty();
+        }
+      });
+    }
+  }
+}
+
+// Register persistence collector
+registerCollector(() => ({
+  section: "Exit Strategies",
+  data: Array.from(exitStrategies.values()),
+}));
 
 function addLog(
   state: ExitStrategyState,
@@ -128,6 +160,7 @@ export interface RunExitParams {
   tokenBalance: bigint;
   profileOrCustom: string;
   uniswapFee?: number;
+  stopLossMultiple?: number;
 }
 
 export async function runExitStrategy(params: RunExitParams): Promise<void> {
@@ -140,6 +173,7 @@ export async function runExitStrategy(params: RunExitParams): Promise<void> {
     tokenBalance,
     profileOrCustom,
     uniswapFee = 3000,
+    stopLossMultiple,
   } = params;
 
   const { name, tranches } = resolveTranches(profileOrCustom);
@@ -160,12 +194,14 @@ export async function runExitStrategy(params: RunExitParams): Promise<void> {
     status: "running",
     log: [],
     uniswapFee,
+    stopLossMultiple,
   };
 
   exitStrategies.set(auctionAddress, state);
+  markDirty();
 
   const trancheDesc = tranches.map((t) => `${t.pctToSell}%@${t.targetMultiple}x`).join(", ");
-  addLog(state, `Exit strategy started: ${name} [${trancheDesc}]`, "info");
+  addLog(state, `Exit strategy started: ${name} [${trancheDesc}]${stopLossMultiple ? ` | stop-loss: ${stopLossMultiple}x` : ""}`, "info");
   addLog(state, `Entry FDV: $${entryFdv.toLocaleString()} | Balance: ${formatTokenBalance(tokenBalance, tokenDecimals)} tokens`, "info");
 
   try {
@@ -174,6 +210,7 @@ export async function runExitStrategy(params: RunExitParams): Promise<void> {
     if (state.status === "running") {
       state.status = "failed";
       addLog(state, `Exit strategy failed: ${err.message}`, "error");
+      markDirty();
     }
   }
 }
@@ -208,6 +245,44 @@ async function pollAndExecute(state: ExitStrategyState): Promise<void> {
           args: [account.address],
         });
         state.currentBalance = onChainBalance.toString();
+
+        // Check stop-loss
+        if (
+          state.stopLossMultiple != null &&
+          state.currentMultiple > 0 &&
+          state.currentMultiple < state.stopLossMultiple &&
+          BigInt(state.currentBalance) > 0n
+        ) {
+          addLog(
+            state,
+            `STOP-LOSS triggered at ${state.currentMultiple.toFixed(2)}x (threshold: ${state.stopLossMultiple}x) — selling 100%`,
+            "sell"
+          );
+          try {
+            const sellAmount = BigInt(state.currentBalance);
+            const { hash, amountOut } = await swapExactInputSingle(
+              state.tokenAddress,
+              USDC_BASE,
+              sellAmount,
+              state.uniswapFee
+            );
+            const usdcReceived = Number(amountOut) / 1e6;
+            state.totalUsdcRealized += usdcReceived;
+            state.currentBalance = "0";
+            // Mark all pending tranches as skipped
+            for (const t of state.tranches) {
+              if (t.status === "pending") t.status = "skipped";
+            }
+            addLog(state, `Stop-loss sold all for $${usdcReceived.toFixed(2)} USDC (tx: ${hash.slice(0, 10)}...)`, "sell");
+          } catch (err: any) {
+            addLog(state, `Stop-loss sell failed: ${err.message}`, "error");
+          }
+          state.status = "stopped";
+          markDirty();
+          clearInterval(interval);
+          resolve();
+          return;
+        }
 
         // Check each pending tranche
         for (const tranche of state.tranches) {
@@ -265,6 +340,7 @@ async function pollAndExecute(state: ExitStrategyState): Promise<void> {
               `Sold ${tranche.amountSold} tokens for $${usdcReceived.toFixed(2)} USDC`,
               "sell"
             );
+            markDirty();
           } catch (err: any) {
             addLog(state, `Tranche ${tranche.targetMultiple}x sell failed: ${err.message}`, "error");
             // Don't mark as executed — will retry next poll
@@ -280,6 +356,7 @@ async function pollAndExecute(state: ExitStrategyState): Promise<void> {
             `All tranches complete. Total realized: $${state.totalUsdcRealized.toFixed(2)} USDC`,
             "info"
           );
+          markDirty();
         }
       } catch (err: any) {
         addLog(state, `Poll error: ${err.message}`, "error");

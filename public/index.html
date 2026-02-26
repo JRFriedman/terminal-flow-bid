@@ -388,7 +388,10 @@ function renderOneMonitor(addr, info, bids, block) {
     if (fdv) h += `<span class="stat"><span class="label">fdv </span><span>${fmtUsd(fdv)}</span></span>`;
     if (strategy) h += `<span style="color:var(--green)">STRATEGY ${strategy.status}</span>`;
     const exitStrat = exitStrategiesCache.find(e => e.auctionAddress === addr);
-    if (exitStrat) h += `<span style="color:var(--cyan)">EXIT ${exitStrat.currentMultiple.toFixed(1)}x ${fmtUsd(exitStrat.totalUsdcRealized)}</span>`;
+    if (exitStrat) {
+      const exitColor = exitStrat.status === 'stopped' ? 'var(--red)' : 'var(--cyan)';
+      h += `<span style="color:${exitColor}">EXIT ${exitStrat.status === 'stopped' ? 'STOPPED' : exitStrat.currentMultiple.toFixed(1) + 'x'} ${fmtUsd(exitStrat.totalUsdcRealized)}</span>`;
+    }
     if (isArmed) h += `<span style="color:var(--green)">ARMED</span>`;
     h += `<span class="expand">&#9660;</span>`;
     h += `</div>`;
@@ -437,11 +440,13 @@ function renderOneMonitor(addr, info, bids, block) {
   const exitStrategy = exitStrategiesCache.find(e => e.auctionAddress === addr);
   if (exitStrategy) {
     const multColor = exitStrategy.currentMultiple >= 2 ? 'var(--green)' : exitStrategy.currentMultiple >= 1 ? 'var(--yellow)' : 'var(--red)';
+    const exitStatusColor = exitStrategy.status === 'stopped' ? 'var(--red)' : 'var(--cyan)';
     h += `<div class="stats-row">`;
-    h += `<span style="color:var(--cyan)"><span class="label">exit</span> ${exitStrategy.profileName} ${exitStrategy.status}</span>`;
+    h += `<span style="color:${exitStatusColor}"><span class="label">exit</span> ${exitStrategy.profileName} ${exitStrategy.status.toUpperCase()}</span>`;
     h += `<span><span class="label">fdv</span> ${fmtUsd(exitStrategy.currentFdv)}</span>`;
     h += `<span style="color:${multColor}"><span class="label">multiple</span> ${exitStrategy.currentMultiple.toFixed(2)}x</span>`;
     h += `<span><span class="label">realized</span> ${fmtUsd(exitStrategy.totalUsdcRealized)}</span>`;
+    if (exitStrategy.stopLossMultiple != null) h += `<span style="color:var(--red)"><span class="label">stop-loss</span> ${exitStrategy.stopLossMultiple}x</span>`;
     h += `</div>`;
     // Tranche details
     if (exitStrategy.tranches && exitStrategy.tranches.length > 0) {
@@ -631,16 +636,17 @@ async function runCmd(raw) {
           '  auctions           list all auctions          Cmd+L',
           '  watch <id>         watch auction (symbol, #, or addr)',
           '  unwatch            stop watching',
-          '  strategy <id> <min> <max> <amt> [exit]  bid strategy',
+          '  strategy <id> <min> <max> <amt> [exit] [stop-loss]  bid strategy',
           '  strategies         show active strategies',
           '  cancel <id>        cancel a strategy',
           '  arm <fdv> <amt>    schedule fixed bid for start',
           '  bid <fdv> <amt>    bid now on watched auction',
           '  info <id>          one-shot auction lookup',
           '',
-          '  exit <id> [profile]  start exit strategy after graduation',
+          '  exit <id> [profile] [stop-loss]  start exit strategy',
           '                       profiles: conservative, moderate, aggressive',
           '                       custom: exit <id> 50@3x,50@5x',
+          '                       stop-loss: exit <id> moderate 0.5',
           '  exits              list active exit strategies',
           '  exit-cancel <id>   cancel exit strategy',
           '  price <id>         check token price on Uniswap',
@@ -798,15 +804,17 @@ async function runCmd(raw) {
       }
 
       case 'strategy': {
-        // strategy <auction> <minFdv> <maxFdv> <amount> [exit-profile]
+        // strategy <auction> <minFdv> <maxFdv> <amount> [exit-profile] [stop-loss]
         const id = parts[1];
         const minFdv = parts[2];
         const maxFdv = parts[3];
         const amt = parts[4];
         const exitProf = parts[5] || undefined;
+        const stratStopLoss = parts[6] ? Number(parts[6]) : undefined;
         if (!id || !minFdv || !maxFdv || !amt) {
-          print('usage: strategy <auction> <minFdv> <maxFdv> <amount> [exit-profile]', 'err');
+          print('usage: strategy <auction> <minFdv> <maxFdv> <amount> [exit-profile] [stop-loss]', 'err');
           print('  exit profiles: conservative, moderate, aggressive, or custom 50@3x,50@5x', 'dim');
+          print('  stop-loss: e.g. 0.5 = sell all if drops below 0.5x entry', 'dim');
           break;
         }
         const addr = await resolveAuction(id);
@@ -816,6 +824,7 @@ async function runCmd(raw) {
         print(`  FDV range: $${fmtUsd(Number(minFdv))} → $${fmtUsd(Number(maxFdv))}`, 'dim');
         print(`  Amount: ${amt} USDC`, 'dim');
         if (exitProf) print(`  Exit: ${exitProf}`, 'dim');
+        if (stratStopLoss != null) print(`  Stop-loss: ${stratStopLoss}x`, 'dim');
         const stratBody = {
           auctionAddress: addr,
           minFdvUsd: Number(minFdv),
@@ -823,6 +832,7 @@ async function runCmd(raw) {
           amount: Number(amt),
         };
         if (exitProf) stratBody.exitProfile = exitProf;
+        if (stratStopLoss != null) stratBody.stopLoss = stratStopLoss;
         const res = await fetch('/api/strategy', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -832,6 +842,7 @@ async function runCmd(raw) {
         if (data.error) throw new Error(data.error);
         let okMsg = `strategy active — agent will bid low and adjust up to $${fmtUsd(Number(maxFdv))} FDV`;
         if (exitProf) okMsg += ` | exit: ${exitProf}`;
+        if (stratStopLoss != null) okMsg += ` | stop-loss: ${stratStopLoss}x`;
         print(okMsg, 'ok');
         if (!pollInterval) startPolling();
         break;
@@ -871,13 +882,15 @@ async function runCmd(raw) {
       }
 
       case 'exit': {
-        // exit <auction> [profile]  — profile can be conservative/moderate/aggressive or custom "50@3x,50@5x"
+        // exit <auction> [profile] [stop-loss]
         const exitId = parts[1];
         const exitProfile = parts[2] || 'moderate';
+        const exitStopLoss = parts[3] ? Number(parts[3]) : undefined;
         if (!exitId) {
-          print('usage: exit <auction> [profile]', 'err');
+          print('usage: exit <auction> [profile] [stop-loss]', 'err');
           print('  profiles: conservative, moderate, aggressive', 'dim');
           print('  custom:   exit <auction> 50@3x,50@5x', 'dim');
+          print('  stop-loss: exit <auction> moderate 0.5', 'dim');
           break;
         }
         const exitAddr = await resolveAuction(exitId);
@@ -885,17 +898,22 @@ async function runCmd(raw) {
         const exitMatch = launchesCache.find(l => l.auction === exitAddr);
         print(`starting exit strategy on ${exitMatch ? exitMatch.tokenSymbol : shortAddr(exitAddr)}...`, 'dim');
         print(`  profile: ${exitProfile}`, 'dim');
+        if (exitStopLoss != null) print(`  stop-loss: ${exitStopLoss}x`, 'dim');
+        const exitBody = {
+          auctionAddress: exitAddr,
+          profileOrCustom: exitProfile,
+        };
+        if (exitStopLoss != null) exitBody.stopLoss = exitStopLoss;
         const exitRes = await fetch('/api/exit-strategy', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            auctionAddress: exitAddr,
-            profileOrCustom: exitProfile,
-          }),
+          body: JSON.stringify(exitBody),
         });
         const exitData = await exitRes.json();
         if (exitData.error) throw new Error(exitData.error);
-        print(`exit strategy active — entry FDV: ${fmtUsd(exitData.entryFdv)}`, 'ok');
+        let exitOkMsg = `exit strategy active — entry FDV: ${fmtUsd(exitData.entryFdv)}`;
+        if (exitStopLoss != null) exitOkMsg += ` | stop-loss: ${exitStopLoss}x`;
+        print(exitOkMsg, 'ok');
         if (!pollInterval) startPolling();
         break;
       }
@@ -910,8 +928,10 @@ async function runCmd(raw) {
         exits.forEach(e => {
           const match = launchesCache.find(l => l.auction === e.auctionAddress);
           const name = match ? match.tokenSymbol : shortAddr(e.auctionAddress);
-          const multColor = e.currentMultiple >= 2 ? 'ok' : e.currentMultiple >= 1 ? 'warn' : 'err';
-          print(`  ${name}  ${e.profileName} ${e.status}  ${e.currentMultiple.toFixed(2)}x  realized: ${fmtUsd(e.totalUsdcRealized)}`, multColor);
+          const multColor = e.status === 'stopped' ? 'err' : e.currentMultiple >= 2 ? 'ok' : e.currentMultiple >= 1 ? 'warn' : 'err';
+          let exitLine = `  ${name}  ${e.profileName} ${e.status.toUpperCase()}  ${e.currentMultiple.toFixed(2)}x  realized: ${fmtUsd(e.totalUsdcRealized)}`;
+          if (e.stopLossMultiple != null) exitLine += `  stop-loss: ${e.stopLossMultiple}x`;
+          print(exitLine, multColor);
           // Show tranche status
           e.tranches.forEach(t => {
             const icon = t.status === 'executed' ? '\u2713' : t.status === 'skipped' ? '\u2717' : '\u25CB';
