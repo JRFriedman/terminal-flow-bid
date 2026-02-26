@@ -748,7 +748,7 @@ async function runCmd(raw) {
     switch (cmd) {
       case 'help': {
         const old = document.getElementById('help-block');
-        if (old) old.remove();
+        if (old) { old.remove(); helpVisible = false; break; }
         const helpDiv = document.createElement('div');
         helpDiv.id = 'help-block';
         const lines = [
@@ -794,7 +794,8 @@ async function runCmd(raw) {
 
       case 'auctions':
       case 'ls': {
-        print('fetching launches...', 'dim');
+        const oldAuc = document.getElementById('auctions-block');
+        if (oldAuc) { oldAuc.remove(); break; }
         const lRes = await fetch('/api/launches');
         const launches = await lRes.json();
         if (launches.error) throw new Error(launches.error);
@@ -802,7 +803,15 @@ async function runCmd(raw) {
         const blockRes = await fetch('/api/block');
         const block = await blockRes.json();
         const cur = block.blockNumber;
-        print('');
+        const aucDiv = document.createElement('div');
+        aucDiv.id = 'auctions-block';
+        function aucLine(text, cls) {
+          const d = document.createElement('div');
+          d.className = 'line' + (cls ? ' ' + cls : '');
+          d.textContent = text;
+          aucDiv.appendChild(d);
+        }
+        aucLine('');
         launches.forEach((l, i) => {
           const start = parseInt(l.startBlock);
           const end = parseInt(l.endBlock);
@@ -818,11 +827,13 @@ async function runCmd(raw) {
           }
           const line = `  ${String(i + 1).padStart(2)}  ${l.tokenSymbol.padEnd(10)} ${l.tokenName.slice(0, 25).padEnd(25)}  ${statusStr}`;
           const cls = cur < start ? 'warn' : cur < end ? 'ok' : 'dim';
-          print(line, cls);
+          aucLine(line, cls);
         });
-        print('');
-        print('use: watch <symbol>, watch <#>, or watch <addr>', 'dim');
-        print('');
+        aucLine('');
+        aucLine('use: watch <symbol>, watch <#>, or watch <addr>  |  auctions to collapse', 'dim');
+        aucLine('');
+        $output.appendChild(aucDiv);
+        $output.scrollTop = $output.scrollHeight;
         break;
       }
 
