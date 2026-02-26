@@ -99,9 +99,28 @@ export function startTelegramBot(): void {
     console.error("[telegram] Bot error:", err.message || err);
   });
 
-  bot.start({
-    onStart: () => console.log("[telegram] Bot polling started"),
-  });
+  // Start with retry — during deploys, old and new instances overlap briefly
+  async function startWithRetry(attempts = 5): Promise<void> {
+    for (let i = 0; i < attempts; i++) {
+      try {
+        await bot!.start({
+          onStart: () => console.log("[telegram] Bot polling started"),
+        });
+        return;
+      } catch (err: any) {
+        if (err?.error_code === 409 && i < attempts - 1) {
+          const delay = (i + 1) * 3000;
+          console.log(`[telegram] Conflict with other instance, retrying in ${delay / 1000}s...`);
+          await new Promise((r) => setTimeout(r, delay));
+        } else {
+          console.error("[telegram] Bot start failed:", err.message || err);
+          return;
+        }
+      }
+    }
+  }
+
+  startWithRetry();
   console.log("[telegram] Bot started");
 }
 
