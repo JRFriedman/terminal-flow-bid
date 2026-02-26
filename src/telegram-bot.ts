@@ -95,7 +95,13 @@ export function startTelegramBot(): void {
     }
   });
 
-  bot.start();
+  bot.catch((err) => {
+    console.error("[telegram] Bot error:", err.message || err);
+  });
+
+  bot.start({
+    onStart: () => console.log("[telegram] Bot polling started"),
+  });
   console.log("[telegram] Bot started");
 }
 
