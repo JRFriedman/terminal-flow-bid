@@ -1,3 +1,10 @@
+process.on("uncaughtException", (err) => {
+  console.error("[FATAL] Uncaught exception:", err);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("[FATAL] Unhandled rejection:", err);
+});
+
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
