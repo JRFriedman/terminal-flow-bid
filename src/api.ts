@@ -132,3 +132,34 @@ export async function getUserBids(address: string): Promise<UserBid[]> {
   const data = await fetchJson<{ bids: UserBid[] }>(`/user/${address}/bids`);
   return data.bids;
 }
+
+// --- Launch ---
+
+export interface BuildLaunchTxParams {
+  deployer: string;
+  name: string;
+  symbol: string;
+  metadata?: { logo?: string; description?: string; [key: string]: unknown };
+}
+
+export interface BuildLaunchTxResult {
+  to: string;
+  data: string;
+  value: string;
+  predictedTokenAddress: string;
+  predictedAuctionAddress: string | null;
+  feePreference: number;
+  auctionTiming: {
+    currentBlock: string;
+    startBlock: string;
+    endBlock: string;
+    claimBlock: string;
+  };
+}
+
+export async function buildLaunchTx(params: BuildLaunchTxParams): Promise<BuildLaunchTxResult> {
+  return fetchJson<BuildLaunchTxResult>("/launches/build-tx", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+}

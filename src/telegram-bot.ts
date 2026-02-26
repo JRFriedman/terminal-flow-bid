@@ -106,7 +106,7 @@ export function startTelegramBot(): void {
   }
 
   // Commands that take arguments
-  for (const cmd of ["watch", "unwatch", "info", "arm", "disarm", "bid", "strategy", "cancel", "exit", "exit-cancel"]) {
+  for (const cmd of ["watch", "unwatch", "info", "arm", "disarm", "bid", "strategy", "cancel", "exit", "exit-cancel", "launch"]) {
     bot.command(cmd.replace("-", "_"), async (ctx) => {
       try {
         const args = ctx.match ? `${cmd} ${ctx.match}` : cmd;
@@ -180,6 +180,7 @@ async function handleCommand(raw: string): Promise<string> {
         "`bid <id> <fdv> <amt>` — bid now",
         "`exit <id> [profile] [sl]` — exit strategy",
         "`exits` — list exit strategies",
+        "`launch <name> <symbol>` — launch token",
         "`status` — agent state",
         "`wallet` — wallet balances",
         "`info <id>` — auction details",
@@ -467,6 +468,22 @@ async function handleCommand(raw: string): Promise<string> {
         );
       });
       return lines.join("\n");
+    }
+
+    case "launch": {
+      const name = parts[1];
+      const symbol = parts[2];
+      if (!name || !symbol) return "Usage: `launch <name> <symbol>`";
+      const data = await api("/api/launch", "POST", { name, symbol });
+      if (data.error) throw new Error(data.error);
+      const startIn = Math.round(
+        (parseInt(data.auctionTiming.startBlock) - parseInt(data.auctionTiming.currentBlock)) * 2 / 60
+      );
+      let msg = `\u2705 Launched *${name}* ($${symbol})`;
+      msg += `\nToken: \`${data.tokenAddress}\``;
+      msg += `\nAuction starts in ~${startIn}min`;
+      if (data.txHash) msg += `\n[tx](https://basescan.org/tx/${data.txHash})`;
+      return msg;
     }
 
     case "exit-cancel": {

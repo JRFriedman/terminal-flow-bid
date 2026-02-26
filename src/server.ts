@@ -17,6 +17,7 @@ import {
   getCurrentBlock,
   getUserBids,
   getLaunches,
+  buildLaunchTx,
 } from "./api.js";
 import { submitBid } from "./bid.js";
 import { scheduleBid } from "./scheduler.js";
@@ -317,6 +318,81 @@ app.post("/api/bid/schedule", async (req, res) => {
 
     res.json({ status: "armed", auctionAddress, maxFdvUsd, amount });
   } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Launch ───
+app.post("/api/launch", async (req, res) => {
+  try {
+    const { name, symbol, metadata } = req.body;
+    if (!name || !symbol) {
+      res.status(400).json({ error: "Missing name or symbol" });
+      return;
+    }
+    const account = getAccount();
+    const publicClient = getPublicClient();
+    const walletClient = (await import("./config.js")).getWalletClient();
+
+    // Build the launch transaction
+    const result = await buildLaunchTx({
+      deployer: account.address,
+      name,
+      symbol,
+      metadata: metadata || undefined,
+    });
+
+    console.log(`[launch] Deploying ${name} (${symbol})`);
+    console.log(`  Predicted token: ${result.predictedTokenAddress}`);
+    console.log(`  Start block: ${result.auctionTiming.startBlock} (~${Math.round((parseInt(result.auctionTiming.startBlock) - parseInt(result.auctionTiming.currentBlock)) * 2 / 60)}min)`);
+
+    // Send the transaction
+    const hash = await walletClient.sendTransaction({
+      to: result.to as `0x${string}`,
+      data: result.data as `0x${string}`,
+      value: result.value ? BigInt(result.value) : 0n,
+      account,
+      chain: walletClient.chain,
+      gas: 2_000_000n,
+    });
+
+    console.log(`  TX hash: ${hash}`);
+
+    // Wait for confirmation
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    if (receipt.status === "reverted") {
+      throw new Error(`Launch transaction reverted: ${hash}`);
+    }
+
+    console.log(`  Confirmed in block ${receipt.blockNumber}`);
+
+    // Auto-watch the new auction
+    const auctionAddr = result.predictedAuctionAddress || result.predictedTokenAddress;
+    if (auctionAddr && !agent.watching.includes(auctionAddr)) {
+      agent.watching.push(auctionAddr);
+      agent.status = "watching";
+      markDirty();
+    }
+
+    agent.lastResult = {
+      type: "success",
+      message: `Launched ${name} (${symbol})`,
+      txHashes: [hash],
+      timestamp: Date.now(),
+    };
+
+    res.json({
+      status: "launched",
+      txHash: hash,
+      tokenAddress: result.predictedTokenAddress,
+      auctionTiming: result.auctionTiming,
+    });
+  } catch (err: any) {
+    agent.lastResult = {
+      type: "error",
+      message: err.message,
+      timestamp: Date.now(),
+    };
     res.status(500).json({ error: err.message });
   }
 });

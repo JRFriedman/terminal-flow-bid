@@ -771,6 +771,8 @@ async function runCmd(raw) {
           '  exit-cancel <id>   cancel exit strategy',
           '  price <id>         check token price on Uniswap',
           '',
+          '  launch <name> <symbol>  launch a new token',
+          '',
           '  status             show agent state            Cmd+J',
           '  bids               show your bid history       Cmd+B',
           '  wallet             show wallet info            Cmd+W',
@@ -1079,6 +1081,30 @@ async function runCmd(raw) {
         if (ecData.error) throw new Error(ecData.error);
         const ecMatch = launchesCache.find(l => l.auction === ecAddr);
         print(`cancelled exit strategy on ${ecMatch ? ecMatch.tokenSymbol : shortAddr(ecAddr)}`, 'dim');
+        break;
+      }
+
+      case 'launch': {
+        const launchName = parts[1];
+        const launchSymbol = parts[2];
+        if (!launchName || !launchSymbol) { print('usage: launch <name> <symbol>', 'err'); break; }
+        print(`launching ${launchName} ($${launchSymbol})...`, 'dim');
+        const launchRes = await fetch('/api/launch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: launchName, symbol: launchSymbol }),
+        });
+        const launchData = await launchRes.json();
+        if (launchData.error) throw new Error(launchData.error);
+        const startIn = Math.round(
+          (parseInt(launchData.auctionTiming.startBlock) - parseInt(launchData.auctionTiming.currentBlock)) * 2 / 60
+        );
+        print(`launched ${launchName} ($${launchSymbol})`, 'ok');
+        print(`  token:   ${launchData.tokenAddress}`);
+        print(`  auction: starts in ~${startIn}min (block ${launchData.auctionTiming.startBlock})`);
+        if (launchData.txHash) {
+          printHtml(`  tx: <a href="https://basescan.org/tx/${launchData.txHash}" target="_blank" style="color:var(--cyan)">${launchData.txHash.slice(0, 10)}...${launchData.txHash.slice(-8)}</a>`);
+        }
         break;
       }
 
