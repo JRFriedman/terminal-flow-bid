@@ -17,6 +17,7 @@ export interface StrategyParams {
   minFdvUsd: number;
   maxFdvUsd: number;
   amount: number;
+  exitProfile?: string; // "conservative", "moderate", "aggressive", or custom "50@3x,50@5x"
 }
 
 export interface StrategyState {
@@ -28,6 +29,7 @@ export interface StrategyState {
   lastBidFdv: number | null;
   clearingPrice: string | null;
   totalBids: number;
+  exitProfile?: string;
   log: Array<{ time: number; message: string; type: "info" | "bid" | "error" }>;
 }
 
@@ -64,7 +66,7 @@ function addLog(
 }
 
 export async function runStrategy(params: StrategyParams): Promise<void> {
-  const { bidder, auctionAddress, minFdvUsd, maxFdvUsd, amount } = params;
+  const { bidder, auctionAddress, minFdvUsd, maxFdvUsd, amount, exitProfile } = params;
 
   const state: StrategyState = {
     auctionAddress,
@@ -75,6 +77,7 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
     lastBidFdv: null,
     clearingPrice: null,
     totalBids: 0,
+    exitProfile,
     log: [],
   };
   strategies.set(auctionAddress, state);
@@ -148,8 +151,7 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
           }
 
           const blocksLeft = endBlock - currentBlock.blockNumber;
-          const bidList = Array.isArray(bids) ? bids : (bids as any).bids || [];
-          state.totalBids = bidList.length;
+          state.totalBids = bids.length;
           state.clearingPrice = (auctionInfo as any).clearingPrice || null;
 
           // Track implied FDV from clearing price
@@ -159,7 +161,7 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
           }
 
           // Decide whether to adjust
-          const newFdv = calculateAdjustment(state, bidList, auctionInfo, {
+          const newFdv = calculateAdjustment(state, bids, auctionInfo, {
             minFdvUsd,
             maxFdvUsd,
             blocksLeft,

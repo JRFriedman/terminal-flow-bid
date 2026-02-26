@@ -14,6 +14,15 @@ import {
 import { submitBid } from "./bid.js";
 import { scheduleBid } from "./scheduler.js";
 import { runStrategy, getStrategies, getStrategy, cancelStrategy } from "./strategy.js";
+import {
+  runExitStrategy,
+  getExitStrategies,
+  getExitStrategy,
+  cancelExitStrategy,
+  resolveTranches,
+} from "./exit-strategy.js";
+import { getTokenPrice } from "./swap.js";
+import { startGraduationMonitor } from "./graduation-monitor.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -81,6 +90,20 @@ app.post("/api/agent/unwatch", (req, res) => {
   if (agent.watching.length === 0) {
     agent.armedBids = [];
     agent.status = "idle";
+  }
+  res.json(agent);
+});
+
+// POST /api/agent/disarm — remove armed bid without unwatching
+app.post("/api/agent/disarm", (req, res) => {
+  const { auctionAddress } = req.body || {};
+  if (auctionAddress) {
+    agent.armedBids = agent.armedBids.filter((b) => b.auctionAddress !== auctionAddress);
+  } else {
+    agent.armedBids = [];
+  }
+  if (agent.armedBids.length === 0 && agent.status === "armed") {
+    agent.status = agent.watching.length > 0 ? "watching" : "idle";
   }
   res.json(agent);
 });
@@ -265,7 +288,7 @@ app.get("/api/strategy/:addr", (req, res) => {
 
 app.post("/api/strategy", async (req, res) => {
   try {
-    const { auctionAddress, minFdvUsd, maxFdvUsd, amount } = req.body;
+    const { auctionAddress, minFdvUsd, maxFdvUsd, amount, exitProfile } = req.body;
     if (!auctionAddress || !minFdvUsd || !maxFdvUsd || !amount) {
       res.status(400).json({ error: "Missing auctionAddress, minFdvUsd, maxFdvUsd, or amount" });
       return;
@@ -285,6 +308,7 @@ app.post("/api/strategy", async (req, res) => {
       minFdvUsd: Number(minFdvUsd),
       maxFdvUsd: Number(maxFdvUsd),
       amount: Number(amount),
+      exitProfile: exitProfile || undefined,
     })
       .then(() => {
         agent.lastResult = {
@@ -303,7 +327,7 @@ app.post("/api/strategy", async (req, res) => {
         agent.status = agent.watching.length > 0 ? "watching" : "idle";
       });
 
-    res.json({ status: "started", auctionAddress, minFdvUsd, maxFdvUsd, amount });
+    res.json({ status: "started", auctionAddress, minFdvUsd, maxFdvUsd, amount, exitProfile });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -318,7 +342,134 @@ app.post("/api/strategy/:addr/cancel", (req, res) => {
   res.json({ status: "cancelled" });
 });
 
+// ─── Exit Strategies ───
+app.get("/api/exit-strategies", (_req, res) => {
+  res.json(getExitStrategies());
+});
+
+app.get("/api/exit-strategy/:addr", (req, res) => {
+  const s = getExitStrategy(req.params.addr);
+  if (!s) {
+    res.status(404).json({ error: "No exit strategy for this auction" });
+    return;
+  }
+  res.json(s);
+});
+
+app.post("/api/exit-strategy", async (req, res) => {
+  try {
+    const { auctionAddress, profileOrCustom } = req.body;
+    if (!auctionAddress) {
+      res.status(400).json({ error: "Missing auctionAddress" });
+      return;
+    }
+    const profile = profileOrCustom || "moderate";
+
+    // Validate profile
+    try {
+      resolveTranches(profile);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+
+    // Look up auction info
+    const auction = await getAuction(auctionAddress);
+    const launches = await getLaunches();
+    const launch = launches.find((l) => l.auction === auctionAddress);
+    if (!launch) {
+      res.status(404).json({ error: "Auction not found in launches" });
+      return;
+    }
+
+    const tokenAddress = launch.token as `0x${string}`;
+    const tokenDecimals = parseInt(String((launch as any).tokenDecimals || "18"));
+    const totalSupply = BigInt((launch as any).totalSupply || "0");
+
+    // Get token balance
+    const publicClient = getPublicClient();
+    const account = getAccount();
+    const tokenBalance = await publicClient.readContract({
+      address: tokenAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [account.address],
+    });
+
+    if (tokenBalance === 0n) {
+      res.status(400).json({ error: "No token balance in wallet" });
+      return;
+    }
+
+    // Compute entry FDV from clearing price
+    const info = launch as any;
+    const clearingQ96 = parseFloat(info.clearingPrice || "0");
+    const floorPrice = parseFloat(info.floorPrice || "0");
+    let entryFdv = 0;
+    if (clearingQ96 > 0 && floorPrice > 0) {
+      const requiredRaised = parseFloat(info.requiredCurrencyRaised || "0");
+      const auctionAmount = parseFloat(info.auctionAmount || "0");
+      const ts = parseFloat(info.totalSupply || "0");
+      if (auctionAmount > 0 && ts > 0 && requiredRaised > 0) {
+        const reqHuman = requiredRaised / 1e6;
+        const aucHuman = auctionAmount / 10 ** tokenDecimals;
+        const supHuman = ts / 10 ** tokenDecimals;
+        const floorFdv = (reqHuman / aucHuman) * supHuman;
+        entryFdv = clearingQ96 * (floorFdv / floorPrice);
+      }
+    }
+
+    if (entryFdv <= 0) {
+      res.status(400).json({ error: "Could not compute entry FDV from clearing price" });
+      return;
+    }
+
+    // Start in background
+    runExitStrategy({
+      auctionAddress,
+      tokenAddress,
+      tokenDecimals,
+      totalSupply,
+      entryFdv,
+      tokenBalance,
+      profileOrCustom: profile,
+    }).catch((err) => {
+      console.error("Exit strategy error:", err.message);
+    });
+
+    res.json({
+      status: "started",
+      auctionAddress,
+      profile,
+      entryFdv: Math.round(entryFdv),
+      tokenBalance: tokenBalance.toString(),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/exit-strategy/:addr/cancel", (req, res) => {
+  const cancelled = cancelExitStrategy(req.params.addr);
+  if (!cancelled) {
+    res.status(404).json({ error: "No active exit strategy for this auction" });
+    return;
+  }
+  res.json({ status: "cancelled" });
+});
+
+// ─── Token price ───
+app.get("/api/token/:addr/price", async (req, res) => {
+  try {
+    const price = await getTokenPrice(req.params.addr as `0x${string}`);
+    res.json({ token: req.params.addr, priceUsd: price });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, () => {
   console.log(`terminal.flow.bid running on http://localhost:${PORT}`);
+  startGraduationMonitor();
 });

@@ -146,6 +146,16 @@ bid
     });
   });
 
+// --- Launch server ---
+program
+  .command("launch")
+  .description("Start the terminal.flow.bid web server")
+  .option("-p, --port <port>", "Port number", "3000")
+  .action(async (opts: { port: string }) => {
+    process.env.PORT = opts.port;
+    await import("./server.js");
+  });
+
 // --- User bids ---
 program
   .command("bids")

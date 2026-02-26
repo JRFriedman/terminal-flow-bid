@@ -229,6 +229,18 @@
 let pollInterval = null;
 let agentState = { watching: null, status: 'idle', armedBid: null, lastResult: null };
 let launchesCache = []; // cached from last `auctions` or boot
+let strategiesCache = []; // cached from last poll
+let exitStrategiesCache = []; // cached from last poll
+
+function q96ToFdv(q96, info) {
+  const floor = parseFloat(info.floorPrice || '0');
+  if (floor <= 0) return 0;
+  const req = parseFloat(info.requiredCurrencyRaised || '0') / 1e6;
+  const auction = parseFloat(info.auctionAmount || '0') / 1e18;
+  const supply = parseFloat(info.totalSupply || '0') / 1e18;
+  if (!auction || !supply || !req) return 0;
+  return q96 * ((req / auction) * supply) / floor;
+}
 
 const $output = document.getElementById('output');
 const $cli = document.getElementById('cli');
@@ -349,18 +361,18 @@ function renderOneMonitor(addr, info, bids, block) {
   else if (status === 'ENDED') progress = 100;
 
   const bidList = Array.isArray(bids) ? bids : [];
-  const totalBids = bidList.length;
-  const bidders = new Set(bidList.map(b => b.bidder || b.sender || b.from || '')).size;
-  const raised = bidList.reduce((s, b) => {
-    const a = parseFloat(b.amount || b.amountUsd || b.amountRaw || 0);
-    return s + (isNaN(a) ? 0 : a);
-  }, 0);
+  const totalBids = (info.stats && info.stats.totalBids) || bidList.length;
+  const bidders = (info.stats && info.stats.uniqueBidders) || new Set(bidList.map(b => b.owner || '')).size;
+  const raisedRaw = parseFloat(info.currencyRaised || '0');
+  const raised = raisedRaw / 1e6;
+  const requiredRaised = parseFloat(info.requiredCurrencyRaised || '0') / 1e6;
 
-  const clearingPrice = info.clearingPrice || info.currentPrice || null;
-  const fdv = info.fdv || info.impliedFdv || info.currentFdv || null;
+  const clearingQ96 = parseFloat(info.clearingPrice || '0');
+  const fdv = clearingQ96 > 0 ? q96ToFdv(clearingQ96, info) : null;
   const armedBids = agentState.armedBids || [];
   const armedBid = armedBids.find(b => b.auctionAddress === addr);
   const isArmed = !!armedBid;
+  const strategy = strategiesCache.find(s => s.auctionAddress === addr && (s.status === 'running' || s.status === 'waiting'));
 
   // Escaped addr for onclick
   const esc = addr.replace(/'/g, "\\'");
@@ -372,8 +384,11 @@ function renderOneMonitor(addr, info, bids, block) {
     h += `<span class="token">${tokenSymbol || tokenName}</span>`;
     h += `<span class="countdown">${countdownShort}</span>`;
     h += `<span class="stat"><span class="label">bids </span><span>${totalBids}</span></span>`;
-    h += `<span class="stat"><span class="label">raised </span><span>${fmtUsd(raised)}</span></span>`;
+    h += `<span class="stat"><span class="label">raised </span><span>${fmtUsd(raised)}${requiredRaised > 0 ? ' / ' + fmtUsd(requiredRaised) : ''}</span></span>`;
     if (fdv) h += `<span class="stat"><span class="label">fdv </span><span>${fmtUsd(fdv)}</span></span>`;
+    if (strategy) h += `<span style="color:var(--green)">STRATEGY ${strategy.status}</span>`;
+    const exitStrat = exitStrategiesCache.find(e => e.auctionAddress === addr);
+    if (exitStrat) h += `<span style="color:var(--cyan)">EXIT ${exitStrat.currentMultiple.toFixed(1)}x ${fmtUsd(exitStrat.totalUsdcRealized)}</span>`;
     if (isArmed) h += `<span style="color:var(--green)">ARMED</span>`;
     h += `<span class="expand">&#9660;</span>`;
     h += `</div>`;
@@ -399,20 +414,59 @@ function renderOneMonitor(addr, info, bids, block) {
   h += `<div class="stats-row">`;
   h += `<span><span class="label">bids</span> ${totalBids}</span>`;
   h += `<span><span class="label">bidders</span> ${bidders}</span>`;
-  h += `<span><span class="label">raised</span> ${fmtUsd(raised)}</span>`;
-  if (clearingPrice) h += `<span><span class="label">price</span> $${clearingPrice}</span>`;
+  h += `<span><span class="label">raised</span> ${fmtUsd(raised)}${requiredRaised > 0 ? ' / ' + fmtUsd(requiredRaised) : ''}</span>`;
   if (fdv) h += `<span><span class="label">fdv</span> ${fmtUsd(fdv)}</span>`;
   h += `</div>`;
+
+  if (strategy) {
+    h += `<div class="stats-row">`;
+    h += `<span style="color:var(--green)"><span class="label">strategy</span> ${strategy.status}</span>`;
+    h += `<span><span class="label">bid fdv</span> ${fmtUsd(strategy.currentFdv)}</span>`;
+    if (strategy.impliedFdv) h += `<span><span class="label">market fdv</span> ${fmtUsd(strategy.impliedFdv)}</span>`;
+    h += `<span><span class="label">bids placed</span> ${strategy.bidsPlaced}</span>`;
+    if (strategy.exitProfile) h += `<span><span class="label">exit</span> ${strategy.exitProfile}</span>`;
+    if (strategy.log && strategy.log.length > 0) {
+      const last = strategy.log[strategy.log.length - 1];
+      const ago = Math.round((Date.now() - last.time) / 1000);
+      h += `<span><span class="label">last</span> ${last.message} (${ago}s ago)</span>`;
+    }
+    h += `</div>`;
+  }
+
+  // Exit strategy display
+  const exitStrategy = exitStrategiesCache.find(e => e.auctionAddress === addr);
+  if (exitStrategy) {
+    const multColor = exitStrategy.currentMultiple >= 2 ? 'var(--green)' : exitStrategy.currentMultiple >= 1 ? 'var(--yellow)' : 'var(--red)';
+    h += `<div class="stats-row">`;
+    h += `<span style="color:var(--cyan)"><span class="label">exit</span> ${exitStrategy.profileName} ${exitStrategy.status}</span>`;
+    h += `<span><span class="label">fdv</span> ${fmtUsd(exitStrategy.currentFdv)}</span>`;
+    h += `<span style="color:${multColor}"><span class="label">multiple</span> ${exitStrategy.currentMultiple.toFixed(2)}x</span>`;
+    h += `<span><span class="label">realized</span> ${fmtUsd(exitStrategy.totalUsdcRealized)}</span>`;
+    h += `</div>`;
+    // Tranche details
+    if (exitStrategy.tranches && exitStrategy.tranches.length > 0) {
+      h += `<div class="stats-row" style="flex-wrap:wrap;gap:8px 16px;">`;
+      exitStrategy.tranches.forEach((t, i) => {
+        const tColor = t.status === 'executed' ? 'var(--green)' : t.status === 'skipped' ? 'var(--dim)' : 'var(--muted)';
+        let tText = `${t.pctToSell}% @ ${t.targetMultiple}x`;
+        if (t.status === 'executed') tText += ` → $${t.usdcReceived}`;
+        h += `<span style="color:${tColor}">${t.status === 'executed' ? '\u2713' : t.status === 'skipped' ? '\u2717' : '\u25CB'} ${tText}</span>`;
+      });
+      h += `</div>`;
+    }
+  }
 
   if (bidList.length > 0) {
     h += `<table class="bids-table"><tr><th>block</th><th>bidder</th><th>amount</th><th>max fdv</th></tr>`;
     bidList.slice(-8).reverse().forEach(b => {
-      const ba = b.bidder || b.sender || b.from || '—';
+      const ba = b.owner || '—';
       const short = ba.length > 10 ? ba.slice(0, 6) + '..' + ba.slice(-4) : ba;
-      const amt = b.amount || b.amountUsd || b.amountRaw || '—';
-      const mf = b.maxFdvUsd || b.maxFdv || null;
-      const blk = b.blockNumber || b.block || '—';
-      h += `<tr><td>${blk}</td><td>${short}</td><td>${amt}</td><td>${mf ? fmtUsd(mf) : '—'}</td></tr>`;
+      const amtRaw = parseFloat(b.amountBid || '0');
+      const amt = amtRaw > 0 ? fmtUsd(amtRaw / 1e6) : '—';
+      const maxPriceQ96 = parseFloat(b.maxPrice || '0');
+      const bidFdv = maxPriceQ96 > 0 ? q96ToFdv(maxPriceQ96, info) : null;
+      const blk = b.submittedAtBlock || '—';
+      h += `<tr><td>${blk}</td><td>${short}</td><td>${amt}</td><td>${bidFdv ? fmtUsd(bidFdv) : '—'}</td></tr>`;
     });
     h += `</table>`;
   }
@@ -476,12 +530,16 @@ function stopPolling() {
 
 async function pollAll() {
   try {
-    const [agentRes, blockRes] = await Promise.all([
+    const [agentRes, blockRes, stratRes, exitRes] = await Promise.all([
       fetch('/api/agent'),
       fetch('/api/block'),
+      fetch('/api/strategies'),
+      fetch('/api/exit-strategies'),
     ]);
     agentState = await agentRes.json();
     const block = await blockRes.json();
+    try { strategiesCache = await stratRes.json(); } catch { strategiesCache = []; }
+    try { exitStrategiesCache = await exitRes.json(); } catch { exitStrategiesCache = []; }
     const addrs = agentState.watching || [];
 
     if (addrs.length === 0) {
@@ -573,12 +631,20 @@ async function runCmd(raw) {
           '  auctions           list all auctions          Cmd+L',
           '  watch <id>         watch auction (symbol, #, or addr)',
           '  unwatch            stop watching',
-          '  strategy <id> <min> <max> <amt>  reactive bid strategy',
+          '  strategy <id> <min> <max> <amt> [exit]  bid strategy',
           '  strategies         show active strategies',
           '  cancel <id>        cancel a strategy',
           '  arm <fdv> <amt>    schedule fixed bid for start',
           '  bid <fdv> <amt>    bid now on watched auction',
           '  info <id>          one-shot auction lookup',
+          '',
+          '  exit <id> [profile]  start exit strategy after graduation',
+          '                       profiles: conservative, moderate, aggressive',
+          '                       custom: exit <id> 50@3x,50@5x',
+          '  exits              list active exit strategies',
+          '  exit-cancel <id>   cancel exit strategy',
+          '  price <id>         check token price on Uniswap',
+          '',
           '  status             show agent state            Cmd+J',
           '  bids               show your bid history       Cmd+B',
           '  wallet             show wallet info            Cmd+W',
@@ -709,18 +775,38 @@ async function runCmd(raw) {
       }
 
       case 'disarm': {
-        print('disarmed (note: server-side scheduled bid may still execute)', 'warn');
+        const disarmInput = parts[1];
+        let disarmAddr = null;
+        if (disarmInput) {
+          disarmAddr = await resolveAuction(disarmInput);
+          if (!disarmAddr) { print(`could not find auction: ${disarmInput}`, 'err'); break; }
+        }
+        const disarmRes = await fetch('/api/agent/disarm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(disarmAddr ? { auctionAddress: disarmAddr } : {}),
+        });
+        agentState = await disarmRes.json();
+        if (disarmAddr) {
+          const match = launchesCache.find(l => l.auction === disarmAddr);
+          print(`disarmed ${match ? match.tokenSymbol : shortAddr(disarmAddr)}`, 'ok');
+        } else {
+          print('disarmed all', 'ok');
+        }
+        renderAllMonitors();
         break;
       }
 
       case 'strategy': {
-        // strategy <auction> <minFdv> <maxFdv> <amount>
+        // strategy <auction> <minFdv> <maxFdv> <amount> [exit-profile]
         const id = parts[1];
         const minFdv = parts[2];
         const maxFdv = parts[3];
         const amt = parts[4];
+        const exitProf = parts[5] || undefined;
         if (!id || !minFdv || !maxFdv || !amt) {
-          print('usage: strategy <auction> <minFdv> <maxFdv> <amount>', 'err');
+          print('usage: strategy <auction> <minFdv> <maxFdv> <amount> [exit-profile]', 'err');
+          print('  exit profiles: conservative, moderate, aggressive, or custom 50@3x,50@5x', 'dim');
           break;
         }
         const addr = await resolveAuction(id);
@@ -729,19 +815,24 @@ async function runCmd(raw) {
         print(`starting strategy on ${match ? match.tokenSymbol : shortAddr(addr)}...`, 'dim');
         print(`  FDV range: $${fmtUsd(Number(minFdv))} → $${fmtUsd(Number(maxFdv))}`, 'dim');
         print(`  Amount: ${amt} USDC`, 'dim');
+        if (exitProf) print(`  Exit: ${exitProf}`, 'dim');
+        const stratBody = {
+          auctionAddress: addr,
+          minFdvUsd: Number(minFdv),
+          maxFdvUsd: Number(maxFdv),
+          amount: Number(amt),
+        };
+        if (exitProf) stratBody.exitProfile = exitProf;
         const res = await fetch('/api/strategy', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            auctionAddress: addr,
-            minFdvUsd: Number(minFdv),
-            maxFdvUsd: Number(maxFdv),
-            amount: Number(amt),
-          }),
+          body: JSON.stringify(stratBody),
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
-        print(`strategy active — agent will bid low and adjust up to $${fmtUsd(Number(maxFdv))} FDV`, 'ok');
+        let okMsg = `strategy active — agent will bid low and adjust up to $${fmtUsd(Number(maxFdv))} FDV`;
+        if (exitProf) okMsg += ` | exit: ${exitProf}`;
+        print(okMsg, 'ok');
         if (!pollInterval) startPolling();
         break;
       }
@@ -776,6 +867,93 @@ async function runCmd(raw) {
         if (data.error) throw new Error(data.error);
         const match = launchesCache.find(l => l.auction === addr);
         print(`cancelled strategy on ${match ? match.tokenSymbol : shortAddr(addr)}`, 'dim');
+        break;
+      }
+
+      case 'exit': {
+        // exit <auction> [profile]  — profile can be conservative/moderate/aggressive or custom "50@3x,50@5x"
+        const exitId = parts[1];
+        const exitProfile = parts[2] || 'moderate';
+        if (!exitId) {
+          print('usage: exit <auction> [profile]', 'err');
+          print('  profiles: conservative, moderate, aggressive', 'dim');
+          print('  custom:   exit <auction> 50@3x,50@5x', 'dim');
+          break;
+        }
+        const exitAddr = await resolveAuction(exitId);
+        if (!exitAddr) { print(`could not find auction: ${exitId}`, 'err'); break; }
+        const exitMatch = launchesCache.find(l => l.auction === exitAddr);
+        print(`starting exit strategy on ${exitMatch ? exitMatch.tokenSymbol : shortAddr(exitAddr)}...`, 'dim');
+        print(`  profile: ${exitProfile}`, 'dim');
+        const exitRes = await fetch('/api/exit-strategy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            auctionAddress: exitAddr,
+            profileOrCustom: exitProfile,
+          }),
+        });
+        const exitData = await exitRes.json();
+        if (exitData.error) throw new Error(exitData.error);
+        print(`exit strategy active — entry FDV: ${fmtUsd(exitData.entryFdv)}`, 'ok');
+        if (!pollInterval) startPolling();
+        break;
+      }
+
+      case 'exits': {
+        const exRes = await fetch('/api/exit-strategies');
+        const exits = await exRes.json();
+        if (!Array.isArray(exits) || exits.length === 0) {
+          print('no active exit strategies', 'dim');
+          break;
+        }
+        exits.forEach(e => {
+          const match = launchesCache.find(l => l.auction === e.auctionAddress);
+          const name = match ? match.tokenSymbol : shortAddr(e.auctionAddress);
+          const multColor = e.currentMultiple >= 2 ? 'ok' : e.currentMultiple >= 1 ? 'warn' : 'err';
+          print(`  ${name}  ${e.profileName} ${e.status}  ${e.currentMultiple.toFixed(2)}x  realized: ${fmtUsd(e.totalUsdcRealized)}`, multColor);
+          // Show tranche status
+          e.tranches.forEach(t => {
+            const icon = t.status === 'executed' ? '\u2713' : t.status === 'skipped' ? '\u2717' : '\u25CB';
+            let line = `    ${icon} ${t.pctToSell}% @ ${t.targetMultiple}x`;
+            if (t.status === 'executed') line += ` → $${t.usdcReceived} USDC`;
+            print(line, t.status === 'executed' ? 'ok' : 'dim');
+          });
+          // Last log
+          if (e.log && e.log.length > 0) {
+            const last = e.log[e.log.length - 1];
+            const ago = Math.round((Date.now() - last.time) / 1000);
+            print(`    ${last.message} (${ago}s ago)`, last.type === 'error' ? 'err' : last.type === 'sell' ? 'ok' : 'dim');
+          }
+        });
+        break;
+      }
+
+      case 'exit-cancel': {
+        const ecId = parts[1];
+        if (!ecId) { print('usage: exit-cancel <auction>', 'err'); break; }
+        const ecAddr = await resolveAuction(ecId);
+        if (!ecAddr) { print(`could not find auction: ${ecId}`, 'err'); break; }
+        const ecRes = await fetch(`/api/exit-strategy/${ecAddr}/cancel`, { method: 'POST' });
+        const ecData = await ecRes.json();
+        if (ecData.error) throw new Error(ecData.error);
+        const ecMatch = launchesCache.find(l => l.auction === ecAddr);
+        print(`cancelled exit strategy on ${ecMatch ? ecMatch.tokenSymbol : shortAddr(ecAddr)}`, 'dim');
+        break;
+      }
+
+      case 'price': {
+        const priceId = parts[1];
+        if (!priceId) { print('usage: price <auction>', 'err'); break; }
+        const priceAddr = await resolveAuction(priceId);
+        if (!priceAddr) { print(`could not find auction: ${priceId}`, 'err'); break; }
+        const priceLaunch = launchesCache.find(l => l.auction === priceAddr);
+        if (!priceLaunch) { print('auction not found in launches', 'err'); break; }
+        print('querying uniswap...', 'dim');
+        const priceRes = await fetch(`/api/token/${priceLaunch.token}/price`);
+        const priceData = await priceRes.json();
+        if (priceData.error) throw new Error(priceData.error);
+        print(`  ${priceLaunch.tokenSymbol} price: $${priceData.priceUsd.toFixed(6)}`, 'ok');
         break;
       }
 
@@ -960,7 +1138,8 @@ async function boot() {
     }
     startPolling();
   } else {
-    print('agent idle — type auctions or help', 'dim');
+    // Auto-show auctions on cold start so user sees available launches
+    await runCmd('auctions');
   }
 }
 
