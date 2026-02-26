@@ -33,11 +33,18 @@ export interface BuildBidTxParams {
 }
 
 export interface BuildBidTxResult {
-  steps: Array<{
+  steps?: Array<{
     to: string;
     data: string;
     value?: string;
     gasLimit?: string;
+  }>;
+  transactions?: Array<{
+    to: string;
+    data: string;
+    value?: string;
+    step?: number;
+    description?: string;
   }>;
   params: {
     maxFdvUsd: number;
@@ -113,7 +120,8 @@ export async function getAuction(auctionAddress: string): Promise<AuctionInfo> {
 }
 
 export async function getAuctionBids(auctionAddress: string): Promise<AuctionBid[]> {
-  return fetchJson<AuctionBid[]>(`/launches/${auctionAddress}/bids`);
+  const data = await fetchJson<{ bids: AuctionBid[] }>(`/launches/${auctionAddress}/bids`);
+  return data.bids;
 }
 
 export async function getCurrentBlock(): Promise<CurrentBlock> {
@@ -121,5 +129,6 @@ export async function getCurrentBlock(): Promise<CurrentBlock> {
 }
 
 export async function getUserBids(address: string): Promise<UserBid[]> {
-  return fetchJson<UserBid[]>(`/user/${address}/bids`);
+  const data = await fetchJson<{ bids: UserBid[] }>(`/user/${address}/bids`);
+  return data.bids;
 }

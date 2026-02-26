@@ -18,12 +18,14 @@ export async function submitBid(params: BuildBidTxParams): Promise<BidResult> {
   console.log("\nBuilding bid transactions...");
   const result = await buildBidTx(params);
 
+  const steps = result.steps || (result as any).transactions || [];
+
   console.log(`\nBid parameters:`);
   console.log(`  Max FDV:  $${params.maxFdvUsd}`);
   console.log(`  Amount:   ${params.amount} USDC`);
   console.log(`  Auction:  ${params.auctionAddress}`);
   console.log(`  Currency: ${result.params.currencyAddress}`);
-  console.log(`  Steps:    ${result.steps.length} transaction(s)`);
+  console.log(`  Steps:    ${steps.length} transaction(s)`);
 
   const walletClient = getWalletClient();
   const publicClient = getPublicClient();
@@ -32,9 +34,9 @@ export async function submitBid(params: BuildBidTxParams): Promise<BidResult> {
   const links: string[] = [];
 
   // Submit transactions sequentially
-  for (let i = 0; i < result.steps.length; i++) {
-    const step = result.steps[i];
-    console.log(`\nSubmitting transaction ${i + 1}/${result.steps.length}...`);
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    console.log(`\nSubmitting transaction ${i + 1}/${steps.length}...`);
 
     const hash = await walletClient.sendTransaction({
       to: step.to as `0x${string}`,
@@ -42,6 +44,7 @@ export async function submitBid(params: BuildBidTxParams): Promise<BidResult> {
       value: step.value ? BigInt(step.value) : 0n,
       account,
       chain: walletClient.chain,
+      gas: 500_000n,
     });
 
     console.log(`  TX hash: ${hash}`);

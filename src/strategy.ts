@@ -10,7 +10,12 @@ import { submitBid } from "./bid.js";
 import { formatCountdown } from "./utils.js";
 import { markDirty, registerCollector } from "./persistence.js";
 
-const POLL_INTERVAL_MS = 4000; // Check every 4 seconds (~2 blocks)
+/** Dynamic poll interval based on blocks remaining */
+function getPollInterval(blocksLeft: number): number {
+  if (blocksLeft <= 5) return 2000;   // last ~10s: every 2s
+  if (blocksLeft <= 30) return 5000;  // last ~1min: every 5s
+  return 30_000;                       // first ~8min: every 30s
+}
 
 export interface StrategyParams {
   bidder: string;
@@ -134,7 +139,7 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
           } catch (err) {
             // Transient error, keep polling
           }
-        }, POLL_INTERVAL_MS);
+        }, 4000);
       });
     }
 
@@ -144,63 +149,89 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
     markDirty();
     addLog(state, "Auction started — placing initial bid", "info");
 
-    // Place initial bid at minFdv
-    await placeBid(state, { bidder, auctionAddress, maxFdvUsd: minFdvUsd, amount });
+    // Fetch initial auction state to bid above clearing
+    let initialFdv = minFdvUsd;
+    try {
+      const auctionInfo = await getAuction(auctionAddress);
+      const clearingQ96 = parseFloat((auctionInfo as any).clearingPrice || "0");
+      if (clearingQ96 > 0) {
+        const impliedFdv = q96ToFdv(clearingQ96, auctionInfo);
+        if (impliedFdv > initialFdv) {
+          // Bid 15% above clearing to ensure acceptance
+          initialFdv = Math.min(Math.ceil(impliedFdv * 1.15), maxFdvUsd);
+          addLog(state, `Clearing FDV is $${Math.round(impliedFdv)}, bidding at $${initialFdv}`, "info");
+        }
+      }
+    } catch {}
 
-    // Poll and adjust during auction
-    await new Promise<void>((resolve) => {
-      const interval = setInterval(async () => {
-        if (state.status === "done") {
-          clearInterval(interval);
-          resolve();
-          return;
+    // Initial bid — don't die if it fails
+    const initialOk = await placeBid(state, { bidder, auctionAddress, maxFdvUsd: initialFdv, amount });
+    if (initialOk) {
+      state.currentFdv = initialFdv;
+    }
+
+    // Poll and adjust during auction with dynamic interval
+    while (state.status !== "done") {
+      try {
+        const [currentBlock, bids, auctionInfo] = await Promise.all([
+          getCurrentBlock(),
+          getAuctionBids(auctionAddress),
+          getAuction(auctionAddress),
+        ]);
+
+        // Check if auction ended
+        if (currentBlock.blockNumber >= endBlock) {
+          addLog(state, "Auction ended", "info");
+          state.status = "done";
+          markDirty();
+          break;
         }
 
-        try {
-          const [currentBlock, bids, auctionInfo] = await Promise.all([
-            getCurrentBlock(),
-            getAuctionBids(auctionAddress),
-            getAuction(auctionAddress),
-          ]);
+        const blocksLeft = endBlock - currentBlock.blockNumber;
+        state.totalBids = bids.length;
+        state.clearingPrice = (auctionInfo as any).clearingPrice || null;
 
-          // Check if auction ended
-          if (currentBlock.blockNumber >= endBlock) {
-            addLog(state, "Auction ended", "info");
-            state.status = "done";
-            markDirty();
-            clearInterval(interval);
-            resolve();
-            return;
-          }
-
-          const blocksLeft = endBlock - currentBlock.blockNumber;
-          state.totalBids = bids.length;
-          state.clearingPrice = (auctionInfo as any).clearingPrice || null;
-
-          // Track implied FDV from clearing price
-          const clearingQ96 = parseFloat((auctionInfo as any).clearingPrice || "0");
-          if (clearingQ96 > 0) {
-            state.impliedFdv = Math.round(q96ToFdv(clearingQ96, auctionInfo));
-          }
-
-          // Decide whether to adjust
-          const newFdv = calculateAdjustment(state, bids, auctionInfo, {
-            minFdvUsd,
-            maxFdvUsd,
-            blocksLeft,
-            auctionDuration: endBlock - startBlock,
-          });
-
-          if (newFdv && newFdv > state.currentFdv) {
-            state.currentFdv = newFdv;
-            addLog(state, `Adjusting FDV to $${newFdv} (${blocksLeft} blocks left)`, "info");
-            await placeBid(state, { bidder, auctionAddress, maxFdvUsd: newFdv, amount });
-          }
-        } catch (err: any) {
-          addLog(state, `Poll error: ${err.message}`, "error");
+        // Track implied FDV from clearing price
+        const clearingQ96 = parseFloat((auctionInfo as any).clearingPrice || "0");
+        if (clearingQ96 > 0) {
+          state.impliedFdv = Math.round(q96ToFdv(clearingQ96, auctionInfo));
         }
-      }, POLL_INTERVAL_MS);
-    });
+
+        // Decide whether to adjust
+        const newFdv = calculateAdjustment(state, bids, auctionInfo, {
+          minFdvUsd,
+          maxFdvUsd,
+          blocksLeft,
+          auctionDuration: endBlock - startBlock,
+        });
+
+        if (newFdv && newFdv > state.currentFdv) {
+          state.currentFdv = newFdv;
+          addLog(state, `Adjusting FDV to $${newFdv} (${blocksLeft} blocks left)`, "info");
+          const ok = await placeBid(state, { bidder, auctionAddress, maxFdvUsd: newFdv, amount });
+          if (!ok && (state.status as string) === "done") break; // AuctionEnded
+        }
+
+        // If we haven't placed any bid yet, keep trying
+        if (state.bidsPlaced === 0 && state.impliedFdv > 0) {
+          const retryFdv = Math.min(Math.ceil(state.impliedFdv * 1.15), maxFdvUsd);
+          if (retryFdv > state.currentFdv) {
+            state.currentFdv = retryFdv;
+            addLog(state, `Retrying bid at $${retryFdv} (above clearing $${state.impliedFdv})`, "info");
+            const ok = await placeBid(state, { bidder, auctionAddress, maxFdvUsd: retryFdv, amount });
+            if (!ok && (state.status as string) === "done") break;
+          }
+        }
+
+        // Wait — shorter as auction end approaches
+        const delay = getPollInterval(blocksLeft);
+        addLog(state, `Next check in ${delay / 1000}s (${blocksLeft} blocks left)`, "info");
+        await new Promise((r) => setTimeout(r, delay));
+      } catch (err: any) {
+        addLog(state, `Poll error: ${err.message}`, "error");
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+    }
   } catch (err: any) {
     state.status = "failed";
     addLog(state, `Strategy failed: ${err.message}`, "error");
@@ -212,16 +243,27 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
 async function placeBid(
   state: StrategyState,
   params: BuildBidTxParams
-): Promise<void> {
+): Promise<boolean> {
   try {
     addLog(state, `Bidding ${params.amount} USDC @ $${params.maxFdvUsd} FDV`, "bid");
     await submitBid(params);
     state.bidsPlaced++;
     state.lastBidFdv = params.maxFdvUsd;
     addLog(state, `Bid confirmed @ $${params.maxFdvUsd} FDV`, "bid");
+    return true;
   } catch (err: any) {
-    addLog(state, `Bid failed: ${err.message}`, "error");
-    throw err;
+    const msg = err.message || String(err);
+    // Extract revert reason if present
+    if (msg.includes("BidMustBeAboveClearingPrice")) {
+      addLog(state, `Bid below clearing price — will retry with higher FDV`, "error");
+    } else if (msg.includes("AuctionEnded")) {
+      addLog(state, `Auction ended`, "error");
+      state.status = "done";
+      markDirty();
+    } else {
+      addLog(state, `Bid failed: ${msg.slice(0, 200)}`, "error");
+    }
+    return false;
   }
 }
 

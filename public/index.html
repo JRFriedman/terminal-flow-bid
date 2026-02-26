@@ -524,7 +524,7 @@ function renderOneMonitor(addr, info, bids, block) {
   h += `<span class="token-name">${tokenName}</span>`;
   if (tokenSymbol) h += `<span style="color:var(--muted)">$${tokenSymbol}</span>`;
   if (isArmed) {
-    h += `<span style="color:var(--green)">[ARMED ${armedBid.amount} USDC @ $${fmtUsd(armedBid.maxFdvUsd)} FDV]</span>`;
+    h += `<span style="color:var(--green)">[ARMED ${armedBid.amount} USDC @ ${fmtUsd(armedBid.maxFdvUsd)} FDV]</span>`;
   }
   h += `<span class="collapse-hint">&#9650;</span>`;
   h += `</div>`;
@@ -896,7 +896,7 @@ async function runCmd(raw) {
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         const match = launchesCache.find(l => l.auction === auctionAddr);
-        print(`armed ${match ? match.tokenSymbol : shortAddr(auctionAddr)} — ${amt} USDC @ $${fmtUsd(Number(fdv))} FDV`, 'ok');
+        print(`armed ${match ? match.tokenSymbol : shortAddr(auctionAddr)} — ${amt} USDC @ ${fmtUsd(Number(fdv))} FDV`, 'ok');
         break;
       }
 
@@ -941,7 +941,7 @@ async function runCmd(raw) {
         if (!addr) { print(`could not find auction: ${id}`, 'err'); break; }
         const match = launchesCache.find(l => l.auction === addr);
         print(`starting strategy on ${match ? match.tokenSymbol : shortAddr(addr)}...`, 'dim');
-        print(`  FDV range: $${fmtUsd(Number(minFdv))} → $${fmtUsd(Number(maxFdv))}`, 'dim');
+        print(`  FDV range: ${fmtUsd(Number(minFdv))} → ${fmtUsd(Number(maxFdv))}`, 'dim');
         print(`  Amount: ${amt} USDC`, 'dim');
         if (exitProf) print(`  Exit: ${exitProf}`, 'dim');
         if (stratStopLoss != null) print(`  Stop-loss: ${stratStopLoss}x`, 'dim');
@@ -960,7 +960,7 @@ async function runCmd(raw) {
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
-        let okMsg = `strategy active — agent will bid low and adjust up to $${fmtUsd(Number(maxFdv))} FDV`;
+        let okMsg = `strategy active — agent will bid low and adjust up to ${fmtUsd(Number(maxFdv))} FDV`;
         if (exitProf) okMsg += ` | exit: ${exitProf}`;
         if (stratStopLoss != null) okMsg += ` | stop-loss: ${stratStopLoss}x`;
         print(okMsg, 'ok');
@@ -978,7 +978,7 @@ async function runCmd(raw) {
         strats.forEach(s => {
           const match = launchesCache.find(l => l.auction === s.auctionAddress);
           const name = match ? match.tokenSymbol : shortAddr(s.auctionAddress);
-          print(`  ${name}  ${s.status}  fdv: $${fmtUsd(s.currentFdv)}  bids: ${s.bidsPlaced}  total: ${s.totalBids}`, s.status === 'running' ? 'ok' : 'dim');
+          print(`  ${name}  ${s.status}  fdv: ${fmtUsd(s.currentFdv)}  bids: ${s.bidsPlaced}  total: ${s.totalBids}`, s.status === 'running' ? 'ok' : 'dim');
           // Show last 3 log entries
           s.log.slice(-3).forEach(l => {
             const ago = Math.round((Date.now() - l.time) / 1000);
@@ -1165,7 +1165,7 @@ async function runCmd(raw) {
         }
         (agentState.armedBids || []).forEach(ab => {
           const match = launchesCache.find(l => l.auction === ab.auctionAddress);
-          print(`armed:    ${ab.amount} USDC @ $${fmtUsd(ab.maxFdvUsd)} FDV on ${match ? match.tokenSymbol : shortAddr(ab.auctionAddress)}`);
+          print(`armed:    ${ab.amount} USDC @ ${fmtUsd(ab.maxFdvUsd)} FDV on ${match ? match.tokenSymbol : shortAddr(ab.auctionAddress)}`);
         });
         if (agentState.lastResult) {
           const r = agentState.lastResult;
@@ -1360,7 +1360,7 @@ async function boot() {
     if (agentState.status === 'armed' && agentState.armedBids?.length) {
       agentState.armedBids.forEach(ab => {
         const m = launchesCache.find(l => l.auction === ab.auctionAddress);
-        print(`agent armed: ${m ? m.tokenSymbol : shortAddr(ab.auctionAddress)} — ${ab.amount} USDC @ $${fmtUsd(ab.maxFdvUsd)} FDV`, 'warn');
+        print(`agent armed: ${m ? m.tokenSymbol : shortAddr(ab.auctionAddress)} — ${ab.amount} USDC @ ${fmtUsd(ab.maxFdvUsd)} FDV`, 'warn');
       });
     }
     startPolling();
