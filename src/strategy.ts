@@ -150,8 +150,9 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
     addLog(state, "Auction started — placing initial bid", "info");
 
     // Fetch initial auction state to bid above clearing
-    // Contract requires strictly above clearing/floor — always add a buffer
-    let initialFdv = Math.ceil(minFdvUsd * 1.01); // At least 1% above floor
+    // Contract requires strictly above clearing/floor — need enough buffer
+    // to survive Q96 tick-spacing alignment (1% gets rounded down to floor)
+    let initialFdv = Math.ceil(minFdvUsd * 1.05); // 5% above floor to clear tick alignment
     try {
       const auctionInfo = await getAuction(auctionAddress);
       const clearingQ96 = parseFloat((auctionInfo as any).clearingPrice || "0");
@@ -215,11 +216,16 @@ export async function runStrategy(params: StrategyParams): Promise<void> {
         }
 
         // If we haven't placed any bid yet, keep trying
-        if (state.bidsPlaced === 0 && state.impliedFdv > 0) {
-          const retryFdv = Math.min(Math.ceil(state.impliedFdv * 1.15), maxFdvUsd);
-          if (retryFdv > state.currentFdv) {
-            state.currentFdv = retryFdv;
-            addLog(state, `Retrying bid at $${retryFdv} (above clearing $${state.impliedFdv})`, "info");
+        if (state.bidsPlaced === 0) {
+          let retryFdv: number;
+          if (state.impliedFdv > 0) {
+            retryFdv = Math.min(Math.ceil(state.impliedFdv * 1.15), maxFdvUsd);
+          } else {
+            // No clearing data — use currentFdv (which gets bumped on each failure)
+            retryFdv = Math.min(state.currentFdv, maxFdvUsd);
+          }
+          if (retryFdv >= state.currentFdv && retryFdv <= maxFdvUsd) {
+            addLog(state, `Retrying bid at $${retryFdv}${state.impliedFdv > 0 ? ` (above clearing $${state.impliedFdv})` : " (no clearing data)"}`, "info");
             const ok = await placeBid(state, { bidder, auctionAddress, maxFdvUsd: retryFdv, amount });
             if (!ok && (state.status as string) === "done") break;
           }
@@ -248,16 +254,24 @@ async function placeBid(
 ): Promise<boolean> {
   try {
     addLog(state, `Bidding ${params.amount} USDC @ $${params.maxFdvUsd} FDV`, "bid");
-    await submitBid(params);
+    const result = await submitBid(params);
     state.bidsPlaced++;
-    state.lastBidFdv = params.maxFdvUsd;
-    addLog(state, `Bid confirmed @ $${params.maxFdvUsd} FDV`, "bid");
+    state.lastBidFdv = result.actualFdv;
+    // Update currentFdv if bid.ts bumped it due to Q96 alignment
+    if (result.actualFdv > state.currentFdv) {
+      state.currentFdv = result.actualFdv;
+    }
+    addLog(state, `Bid confirmed @ $${result.actualFdv} FDV`, "bid");
     return true;
   } catch (err: any) {
     const msg = err.message || String(err);
     // Extract revert reason if present
     if (msg.includes("BidMustBeAboveClearingPrice")) {
-      addLog(state, `Bid below clearing price — will retry with higher FDV`, "error");
+      // Bump FDV for next attempt — even if clearing price is unknown,
+      // aggressive bumps will eventually clear the tick spacing
+      const bumpedFdv = Math.ceil(state.currentFdv * 1.20);
+      addLog(state, `Bid below clearing price (FDV $${state.currentFdv}) — bumping to $${bumpedFdv} for retry`, "error");
+      state.currentFdv = bumpedFdv;
     } else if (msg.includes("AuctionEnded")) {
       addLog(state, `Auction ended`, "error");
       state.status = "done";
