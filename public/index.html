@@ -1145,9 +1145,9 @@ async function runCmd(raw) {
       }
 
       case 'launch': {
-        const launchName = parts[1];
-        const launchSymbol = parts[2];
-        if (!launchName || !launchSymbol) { print('usage: launch <name> <symbol>', 'err'); break; }
+        if (parts.length < 3) { print('usage: launch <name> <SYMBOL> (last word is symbol)', 'err'); break; }
+        const launchSymbol = parts[parts.length - 1];
+        const launchName = parts.slice(1, -1).join(' ');
         print(`launching ${launchName} ($${launchSymbol})...`, 'dim');
         const launchRes = await fetch('/api/launch', {
           method: 'POST',

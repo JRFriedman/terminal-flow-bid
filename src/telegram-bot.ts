@@ -504,9 +504,9 @@ async function handleCommand(raw: string): Promise<string> {
     }
 
     case "launch": {
-      const name = parts[1];
-      const symbol = parts[2];
-      if (!name || !symbol) return "Usage: `launch <name> <symbol>`";
+      if (parts.length < 3) return "Usage: `launch <name> <SYMBOL>` (last word is symbol)";
+      const symbol = parts[parts.length - 1];
+      const name = parts.slice(1, -1).join(" ");
       const data = await api("/api/launch", "POST", { name, symbol });
       if (data.error) throw new Error(data.error);
       const startIn = Math.round(
