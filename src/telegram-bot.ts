@@ -1,0 +1,424 @@
+import { Bot } from "grammy";
+
+const API_BASE = `http://127.0.0.1:${process.env.PORT || 3000}`;
+
+let bot: Bot | null = null;
+
+async function api(path: string, method = "GET", body?: unknown): Promise<any> {
+  const opts: RequestInit = {
+    method,
+    headers: { "Content-Type": "application/json" },
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(`${API_BASE}${path}`, opts);
+  return res.json();
+}
+
+function fmtUsd(n: number): string {
+  if (n >= 1_000_000) return "$" + (n / 1_000_000).toFixed(2) + "M";
+  if (n >= 1_000) return "$" + (n / 1_000).toFixed(1) + "K";
+  return "$" + n.toFixed(2);
+}
+
+function fmtTime(seconds: number): string {
+  if (seconds <= 0) return "now";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const parts: string[] = [];
+  if (h > 0) parts.push(h + "h");
+  if (m > 0) parts.push(m + "m");
+  parts.push(s + "s");
+  return parts.join(" ");
+}
+
+function shortAddr(a: string): string {
+  return a && a.length > 14 ? a.slice(0, 6) + ".." + a.slice(-4) : a;
+}
+
+function q96ToFdv(q96: number, info: any): number {
+  const floor = parseFloat(info.floorPrice || "0");
+  if (floor <= 0) return 0;
+  const req = parseFloat(info.requiredCurrencyRaised || "0") / 1e6;
+  const auction = parseFloat(info.auctionAmount || "0") / 1e18;
+  const supply = parseFloat(info.totalSupply || "0") / 1e18;
+  if (!auction || !supply || !req) return 0;
+  return (q96 * ((req / auction) * supply)) / floor;
+}
+
+let launchesCache: any[] = [];
+
+async function resolveAuction(input: string): Promise<string | null> {
+  if (!input) return null;
+  if (input.startsWith("0x") && input.length > 10) return input;
+  if (launchesCache.length === 0) {
+    launchesCache = await api("/api/launches");
+  }
+  const idx = parseInt(input);
+  if (!isNaN(idx) && idx >= 1 && idx <= launchesCache.length) {
+    return launchesCache[idx - 1].auction;
+  }
+  const lower = input.toLowerCase();
+  const match = launchesCache.find(
+    (l: any) =>
+      l.tokenSymbol.toLowerCase() === lower ||
+      l.tokenName.toLowerCase().includes(lower)
+  );
+  return match ? match.auction : null;
+}
+
+export function startTelegramBot(): void {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    console.log("[telegram] No TELEGRAM_BOT_TOKEN, bot disabled");
+    return;
+  }
+
+  bot = new Bot(token);
+
+  bot.command("start", (ctx) =>
+    ctx.reply(
+      "Flow Terminal Bot\n\nSend commands like you would in the terminal:\nauctions, watch, strategy, bid, wallet, status, help"
+    )
+  );
+
+  // Handle all text messages as CLI commands
+  bot.on("message:text", async (ctx) => {
+    const raw = ctx.message.text.trim();
+    if (raw.startsWith("/")) return; // ignore unknown slash commands
+
+    try {
+      const reply = await handleCommand(raw);
+      await ctx.reply(reply, { parse_mode: "Markdown" });
+    } catch (err: any) {
+      await ctx.reply(`Error: ${err.message}`);
+    }
+  });
+
+  bot.start();
+  console.log("[telegram] Bot started");
+}
+
+async function handleCommand(raw: string): Promise<string> {
+  const parts = raw.split(/\s+/);
+  const cmd = parts[0].toLowerCase();
+
+  switch (cmd) {
+    case "help":
+      return [
+        "*Flow Terminal*",
+        "",
+        "`auctions` — list all auctions",
+        "`watch <id>` — watch auction",
+        "`unwatch` — stop watching",
+        "`strategy <id> <min> <max> <amt> [exit] [sl]` — bid strategy",
+        "`strategies` — show active strategies",
+        "`cancel <id>` — cancel strategy",
+        "`arm <id> <fdv> <amt>` — schedule bid",
+        "`disarm [id]` — remove armed bid",
+        "`bid <id> <fdv> <amt>` — bid now",
+        "`exit <id> [profile] [sl]` — exit strategy",
+        "`exits` — list exit strategies",
+        "`status` — agent state",
+        "`wallet` — wallet balances",
+        "`info <id>` — auction details",
+      ].join("\n");
+
+    case "auctions":
+    case "ls": {
+      const [launches, block] = await Promise.all([
+        api("/api/launches"),
+        api("/api/block"),
+      ]);
+      launchesCache = launches;
+      const cur = block.blockNumber;
+      const lines = ["*Auctions*", ""];
+      launches.forEach((l: any, i: number) => {
+        const start = parseInt(l.startBlock);
+        const end = parseInt(l.endBlock);
+        let status: string;
+        if (cur < start) {
+          status = `starts in ${fmtTime((start - cur) * 2)}`;
+        } else if (cur < end) {
+          status = `LIVE ${fmtTime((end - cur) * 2)} left`;
+        } else {
+          status = l.isGraduated ? "graduated" : "ended";
+        }
+        const icon =
+          cur < start ? "\u23F3" : cur < end ? "\uD83D\uDFE2" : "\u2B1C";
+        lines.push(
+          `${icon} \`${String(i + 1).padStart(2)}\` *${l.tokenSymbol}* ${l.tokenName.slice(0, 20)} — ${status}`
+        );
+      });
+      return lines.join("\n");
+    }
+
+    case "wallet": {
+      const w = await api("/api/wallet");
+      if (w.error) throw new Error(w.error);
+      return [
+        "*Wallet*",
+        `\`${w.address}\``,
+        `ETH: ${parseFloat(w.ethBalance).toFixed(6)}`,
+        `USDC: ${parseFloat(w.usdcBalance).toFixed(2)}`,
+      ].join("\n");
+    }
+
+    case "status": {
+      const agent = await api("/api/agent");
+      const lines = ["*Status:* " + agent.status];
+      const watching = agent.watching || [];
+      if (watching.length === 0) {
+        lines.push("Watching: none");
+      } else {
+        for (const addr of watching) {
+          const match = launchesCache.find((l: any) => l.auction === addr);
+          lines.push(
+            `Watching: ${match ? match.tokenSymbol + " (" + match.tokenName + ")" : shortAddr(addr)}`
+          );
+        }
+      }
+      (agent.armedBids || []).forEach((ab: any) => {
+        const match = launchesCache.find(
+          (l: any) => l.auction === ab.auctionAddress
+        );
+        lines.push(
+          `Armed: ${match ? match.tokenSymbol : shortAddr(ab.auctionAddress)} — ${ab.amount} USDC @ ${fmtUsd(ab.maxFdvUsd)} FDV`
+        );
+      });
+      return lines.join("\n");
+    }
+
+    case "watch": {
+      const input = parts[1];
+      if (!input) return "Usage: `watch <symbol | # | addr>`";
+      const addr = await resolveAuction(input);
+      if (!addr) return `Could not find auction: ${input}`;
+      const data = await api("/api/agent/watch", "POST", {
+        auctionAddress: addr,
+      });
+      if (data.error) throw new Error(data.error);
+      const match = launchesCache.find((l: any) => l.auction === addr);
+      return `\u2705 Watching *${match ? match.tokenSymbol : shortAddr(addr)}*`;
+    }
+
+    case "unwatch":
+    case "stop": {
+      const input = parts[1];
+      if (input) {
+        const addr = await resolveAuction(input);
+        if (!addr) return `Could not find auction: ${input}`;
+        await api("/api/agent/unwatch", "POST", { auctionAddress: addr });
+        const match = launchesCache.find((l: any) => l.auction === addr);
+        return `Unwatched ${match ? match.tokenSymbol : shortAddr(addr)}`;
+      }
+      await api("/api/agent/unwatch", "POST", {});
+      return "Stopped watching all";
+    }
+
+    case "arm": {
+      let auctionInput: string, fdv: string, amt: string;
+      if (parts.length >= 4) {
+        auctionInput = parts[1];
+        fdv = parts[2];
+        amt = parts[3];
+      } else {
+        return "Usage: `arm <auction> <fdv> <amt>`";
+      }
+      const addr = await resolveAuction(auctionInput);
+      if (!addr) return `Could not find auction: ${auctionInput}`;
+      const data = await api("/api/bid/schedule", "POST", {
+        auctionAddress: addr,
+        maxFdvUsd: Number(fdv),
+        amount: Number(amt),
+      });
+      if (data.error) throw new Error(data.error);
+      const match = launchesCache.find((l: any) => l.auction === addr);
+      return `\u2705 Armed *${match ? match.tokenSymbol : shortAddr(addr)}* — ${amt} USDC @ ${fmtUsd(Number(fdv))} FDV`;
+    }
+
+    case "disarm": {
+      const input = parts[1];
+      if (input) {
+        const addr = await resolveAuction(input);
+        if (!addr) return `Could not find auction: ${input}`;
+        await api("/api/agent/disarm", "POST", { auctionAddress: addr });
+        const match = launchesCache.find((l: any) => l.auction === addr);
+        return `Disarmed ${match ? match.tokenSymbol : shortAddr(addr)}`;
+      }
+      await api("/api/agent/disarm", "POST", {});
+      return "Disarmed all";
+    }
+
+    case "bid": {
+      let auctionInput: string, fdv: string, amt: string;
+      if (parts.length >= 4) {
+        auctionInput = parts[1];
+        fdv = parts[2];
+        amt = parts[3];
+      } else {
+        return "Usage: `bid <auction> <fdv> <amt>`";
+      }
+      const addr = await resolveAuction(auctionInput);
+      if (!addr) return `Could not find auction: ${auctionInput}`;
+      const data = await api("/api/bid", "POST", {
+        auctionAddress: addr,
+        maxFdvUsd: Number(fdv),
+        amount: Number(amt),
+      });
+      if (data.error) throw new Error(data.error);
+      const match = launchesCache.find((l: any) => l.auction === addr);
+      let msg = `\u2705 Bid confirmed on *${match ? match.tokenSymbol : shortAddr(addr)}*`;
+      if (data.txHashes) {
+        data.txHashes.forEach((h: string) => {
+          msg += `\n[tx](https://basescan.org/tx/${h})`;
+        });
+      }
+      return msg;
+    }
+
+    case "strategy": {
+      const id = parts[1],
+        minFdv = parts[2],
+        maxFdv = parts[3],
+        amt = parts[4];
+      const exitProf = parts[5] || undefined;
+      const stopLoss = parts[6] ? Number(parts[6]) : undefined;
+      if (!id || !minFdv || !maxFdv || !amt)
+        return "Usage: `strategy <auction> <minFdv> <maxFdv> <amount> [exit] [stop-loss]`";
+      const addr = await resolveAuction(id);
+      if (!addr) return `Could not find auction: ${id}`;
+      const body: any = {
+        auctionAddress: addr,
+        minFdvUsd: Number(minFdv),
+        maxFdvUsd: Number(maxFdv),
+        amount: Number(amt),
+      };
+      if (exitProf) body.exitProfile = exitProf;
+      if (stopLoss != null) body.stopLoss = stopLoss;
+      const data = await api("/api/strategy", "POST", body);
+      if (data.error) throw new Error(data.error);
+      const match = launchesCache.find((l: any) => l.auction === addr);
+      let msg = `\u2705 Strategy started on *${match ? match.tokenSymbol : shortAddr(addr)}*\nFDV: ${fmtUsd(Number(minFdv))} → ${fmtUsd(Number(maxFdv))}\nAmount: ${amt} USDC`;
+      if (exitProf) msg += `\nExit: ${exitProf}`;
+      if (stopLoss != null) msg += `\nStop-loss: ${stopLoss}x`;
+      return msg;
+    }
+
+    case "strategies": {
+      const strats = await api("/api/strategies");
+      if (!Array.isArray(strats) || strats.length === 0)
+        return "No active strategies";
+      const lines = ["*Strategies*", ""];
+      strats.forEach((s: any) => {
+        const match = launchesCache.find(
+          (l: any) => l.auction === s.auctionAddress
+        );
+        const name = match ? match.tokenSymbol : shortAddr(s.auctionAddress);
+        const icon =
+          s.status === "running"
+            ? "\uD83D\uDFE2"
+            : s.status === "waiting"
+              ? "\u23F3"
+              : "\u2B1C";
+        lines.push(
+          `${icon} *${name}* ${s.status} — FDV: ${fmtUsd(s.currentFdv)} — ${s.bidsPlaced} bids`
+        );
+      });
+      return lines.join("\n");
+    }
+
+    case "cancel": {
+      const id = parts[1];
+      if (!id) return "Usage: `cancel <auction>`";
+      const addr = await resolveAuction(id);
+      if (!addr) return `Could not find auction: ${id}`;
+      const data = await api(`/api/strategy/${addr}/cancel`, "POST");
+      if (data.error) throw new Error(data.error);
+      const match = launchesCache.find((l: any) => l.auction === addr);
+      return `Cancelled strategy on ${match ? match.tokenSymbol : shortAddr(addr)}`;
+    }
+
+    case "info": {
+      const input = parts[1];
+      if (!input) return "Usage: `info <symbol | # | addr>`";
+      const addr = await resolveAuction(input);
+      if (!addr) return `Could not find auction: ${input}`;
+      const [info, bids, block] = await Promise.all([
+        api(`/api/auction/${addr}`),
+        api(`/api/auction/${addr}/bids`),
+        api("/api/block"),
+      ]);
+      if (info.error) throw new Error(info.error);
+
+      const cur = block.blockNumber;
+      const start = parseInt(info.startBlock) || 0;
+      const end = parseInt(info.endBlock) || start + 270;
+      let status: string;
+      if (cur < start) status = `\u23F3 WAITING — starts in ${fmtTime((start - cur) * 2)}`;
+      else if (cur < end) status = `\uD83D\uDFE2 LIVE — ${fmtTime((end - cur) * 2)} left`;
+      else status = "\u2B1C ENDED";
+
+      const raised = parseFloat(info.currencyRaised || "0") / 1e6;
+      const required = parseFloat(info.requiredCurrencyRaised || "0") / 1e6;
+      const clearingQ96 = parseFloat(info.clearingPrice || "0");
+      const fdv = clearingQ96 > 0 ? q96ToFdv(clearingQ96, info) : null;
+      const bidList = Array.isArray(bids) ? bids : [];
+
+      const lines = [
+        `*${info.tokenName || ""}* ($${info.tokenSymbol || ""})`,
+        status,
+        `Raised: ${fmtUsd(raised)}${required > 0 ? " / " + fmtUsd(required) : ""}`,
+        `Bids: ${bidList.length}`,
+      ];
+      if (fdv) lines.push(`FDV: ${fmtUsd(fdv)}`);
+      lines.push(`Blocks: ${start} → ${end}`);
+      return lines.join("\n");
+    }
+
+    case "exit": {
+      const exitId = parts[1];
+      const exitProfile = parts[2] || "moderate";
+      const stopLoss = parts[3] ? Number(parts[3]) : undefined;
+      if (!exitId) return "Usage: `exit <auction> [profile] [stop-loss]`";
+      const addr = await resolveAuction(exitId);
+      if (!addr) return `Could not find auction: ${exitId}`;
+      const body: any = { auctionAddress: addr, profileOrCustom: exitProfile };
+      if (stopLoss != null) body.stopLoss = stopLoss;
+      const data = await api("/api/exit-strategy", "POST", body);
+      if (data.error) throw new Error(data.error);
+      const match = launchesCache.find((l: any) => l.auction === addr);
+      return `\u2705 Exit strategy started on *${match ? match.tokenSymbol : shortAddr(addr)}*\nProfile: ${exitProfile}\nEntry FDV: ${fmtUsd(data.entryFdv)}`;
+    }
+
+    case "exits": {
+      const exits = await api("/api/exit-strategies");
+      if (!Array.isArray(exits) || exits.length === 0)
+        return "No active exit strategies";
+      const lines = ["*Exit Strategies*", ""];
+      exits.forEach((e: any) => {
+        const match = launchesCache.find(
+          (l: any) => l.auction === e.auctionAddress
+        );
+        const name = match ? match.tokenSymbol : shortAddr(e.auctionAddress);
+        lines.push(
+          `*${name}* ${e.profileName} ${e.status.toUpperCase()} — ${e.currentMultiple.toFixed(2)}x — realized: ${fmtUsd(e.totalUsdcRealized)}`
+        );
+      });
+      return lines.join("\n");
+    }
+
+    case "exit-cancel": {
+      const id = parts[1];
+      if (!id) return "Usage: `exit-cancel <auction>`";
+      const addr = await resolveAuction(id);
+      if (!addr) return `Could not find auction: ${id}`;
+      const data = await api(`/api/exit-strategy/${addr}/cancel`, "POST");
+      if (data.error) throw new Error(data.error);
+      return `Cancelled exit strategy on ${shortAddr(addr)}`;
+    }
+
+    default:
+      return `Unknown command: ${cmd}\nSend \`help\` for available commands.`;
+  }
+}

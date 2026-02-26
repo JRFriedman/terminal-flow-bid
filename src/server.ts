@@ -23,6 +23,8 @@ import {
 } from "./exit-strategy.js";
 import { getTokenPrice } from "./swap.js";
 import { startGraduationMonitor, setProcessedGraduations } from "./graduation-monitor.js";
+import { startReadinessMonitor, getActiveAlerts, dismissAlert, setAlertedStages } from "./readiness.js";
+import { startTelegramBot } from "./telegram-bot.js";
 import { loadState, markDirty, registerCollector } from "./persistence.js";
 import { setExitStrategies, resumeExitStrategies } from "./exit-strategy.js";
 import { setStrategies } from "./strategy.js";
@@ -32,6 +34,30 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json());
+
+// ─── Auth middleware ───
+const AUTH_TOKEN = process.env.AUTH_TOKEN || "";
+
+if (AUTH_TOKEN) {
+  app.use("/api", (req, res, next) => {
+    // Allow requests from localhost without auth (telegram bot, internal)
+    const ip = req.ip || req.socket.remoteAddress || "";
+    if (ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1") {
+      return next();
+    }
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+    if (token !== AUTH_TOKEN) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    next();
+  });
+  console.log("[auth] API protected with AUTH_TOKEN");
+} else {
+  console.log("[auth] No AUTH_TOKEN set — API is open (local-only)");
+}
+
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 // ─── Agent state ───
@@ -72,7 +98,7 @@ registerCollector(() => ({
 
 // GET /api/agent — current agent state
 app.get("/api/agent", (_req, res) => {
-  res.json(agent);
+  res.json({ ...agent, readinessAlerts: getActiveAlerts() });
 });
 
 // POST /api/agent/watch — add auction to watch list
@@ -488,6 +514,17 @@ app.get("/api/token/:addr/price", async (req, res) => {
   }
 });
 
+// ─── Readiness alerts ───
+app.post("/api/readiness/dismiss", (req, res) => {
+  const { auctionAddress, stage } = req.body;
+  if (!auctionAddress || !stage) {
+    res.status(400).json({ error: "Missing auctionAddress or stage" });
+    return;
+  }
+  dismissAlert(auctionAddress, stage);
+  res.json({ status: "dismissed" });
+});
+
 // ─── Boot: restore state and start ───
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -527,9 +564,20 @@ if (savedState["Processed Graduations"]) {
   }
 }
 
-app.listen(PORT, "127.0.0.1", () => {
+if (savedState["Readiness Alerts"]) {
+  const alerts = savedState["Readiness Alerts"] as any[];
+  if (Array.isArray(alerts)) {
+    setAlertedStages(alerts);
+    console.log(`[boot] Restored readiness alert stages for ${alerts.length} auctions`);
+  }
+}
+
+const HOST = AUTH_TOKEN ? "0.0.0.0" : "127.0.0.1";
+app.listen(PORT, HOST, () => {
   console.log(`terminal.flow.bid running on http://localhost:${PORT}`);
   startGraduationMonitor();
+  startReadinessMonitor(() => agent);
+  startTelegramBot();
   // Resume running exit strategies after load
   resumeExitStrategies();
 });

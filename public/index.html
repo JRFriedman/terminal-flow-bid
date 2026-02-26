@@ -185,6 +185,74 @@
     border-bottom: 1px solid var(--border);
   }
 
+  /* Toast notifications */
+  #toast-container {
+    position: fixed;
+    top: 48px;
+    right: 16px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 360px;
+  }
+  .toast {
+    background: var(--bar-bg);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--yellow);
+    padding: 10px 14px;
+    font-size: 12px;
+    line-height: 1.5;
+    animation: slideIn 0.3s ease;
+    position: relative;
+  }
+  .toast.all-good { border-left-color: var(--green); }
+  .toast .toast-close {
+    position: absolute;
+    top: 4px;
+    right: 8px;
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 14px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .toast .toast-close:hover { color: var(--fg); }
+  .toast .toast-title { font-weight: bold; margin-bottom: 4px; }
+  .toast .check-ok { color: var(--green); }
+  .toast .check-fail { color: var(--red); }
+  @keyframes slideIn {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+  }
+
+  /* Login overlay */
+  #login-overlay {
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+  }
+  #login-overlay.hidden { display: none; }
+  #login-overlay input {
+    background: var(--bar-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 14px;
+    padding: 8px 14px;
+    width: 260px;
+    outline: none;
+  }
+  #login-overlay input:focus { border-color: var(--fg); }
+  #login-overlay .login-err { color: var(--red); font-size: 12px; min-height: 16px; }
+
   /* Input bar */
   .inputbar {
     border-top: 1px solid var(--border);
@@ -208,6 +276,12 @@
 </head>
 <body>
 
+<div id="login-overlay" class="hidden">
+  <span style="color:var(--muted)">terminal.flow.bid</span>
+  <input type="password" id="login-input" placeholder="password" autocomplete="off">
+  <span class="login-err" id="login-err"></span>
+</div>
+
 <div class="topbar">
   <span class="title">terminal.flow.bid</span>
   <span class="wallet" id="wallet"></span>
@@ -215,6 +289,7 @@
 </div>
 
 <div id="monitor"></div>
+<div id="toast-container"></div>
 
 <div id="output"></div>
 
@@ -225,6 +300,50 @@
 </div>
 
 <script>
+// ─── Auth ───
+let authToken = localStorage.getItem('authToken') || '';
+
+// Wrap fetch to inject auth header
+const _origFetch = window.fetch;
+window.fetch = function(url, opts = {}) {
+  if (authToken && typeof url === 'string' && url.startsWith('/api')) {
+    opts.headers = { ...opts.headers, 'Authorization': 'Bearer ' + authToken };
+  }
+  return _origFetch.call(this, url, opts);
+};
+
+async function checkAuth() {
+  // Try a lightweight API call to see if auth is required / valid
+  const res = await _origFetch('/api/block', authToken ? {
+    headers: { 'Authorization': 'Bearer ' + authToken }
+  } : {});
+  if (res.status === 401) {
+    // Auth required — show login
+    document.getElementById('login-overlay').classList.remove('hidden');
+    const loginInput = document.getElementById('login-input');
+    loginInput.focus();
+    loginInput.addEventListener('keydown', async (e) => {
+      if (e.key !== 'Enter') return;
+      const pw = loginInput.value.trim();
+      if (!pw) return;
+      const test = await _origFetch('/api/block', {
+        headers: { 'Authorization': 'Bearer ' + pw }
+      });
+      if (test.status === 401) {
+        document.getElementById('login-err').textContent = 'wrong password';
+        loginInput.value = '';
+        return;
+      }
+      authToken = pw;
+      localStorage.setItem('authToken', pw);
+      document.getElementById('login-overlay').classList.add('hidden');
+      boot();
+    });
+    return false;
+  }
+  return true;
+}
+
 // ─── State ───
 let pollInterval = null;
 let agentState = { watching: null, status: 'idle', armedBid: null, lastResult: null };
@@ -569,6 +688,7 @@ async function pollAll() {
 
     lastPollTime = Date.now();
     renderAllMonitors();
+    checkReadinessAlerts();
   } catch (e) {
     print('poll error: ' + e.message, 'err');
   }
@@ -1119,6 +1239,93 @@ function toggleTheme() {
   }
 })();
 
+// ─── Readiness alerts ───
+const seenAlerts = new Set(); // "addr:stage" keys already shown this session
+let notifPermissionAsked = false;
+
+function playBeep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    gain.gain.value = 0.3;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.3);
+  } catch {}
+}
+
+function checkReadinessAlerts() {
+  const alerts = agentState.readinessAlerts || [];
+  const container = document.getElementById('toast-container');
+
+  alerts.forEach(alert => {
+    const key = alert.auctionAddress + ':' + alert.stage;
+    if (seenAlerts.has(key)) return;
+    seenAlerts.add(key);
+
+    const { checks } = alert;
+    const allGood = checks.usdc.ok && checks.eth.ok && checks.config.ok;
+    const timeLabel = alert.stage === '15min' ? '~15min' : alert.stage === '5min' ? '~5min' : '~1min';
+
+    // Find token name
+    const match = launchesCache.find(l => l.auction === alert.auctionAddress);
+    const tokenLabel = match ? match.tokenSymbol : shortAddr(alert.auctionAddress);
+
+    // Build toast
+    const toast = document.createElement('div');
+    toast.className = 'toast' + (allGood ? ' all-good' : '');
+    toast.id = 'toast-' + key.replace(/[^a-zA-Z0-9]/g, '-');
+
+    const usdcCls = checks.usdc.ok ? 'check-ok' : 'check-fail';
+    const ethCls = checks.eth.ok ? 'check-ok' : 'check-fail';
+    const configCls = checks.config.ok ? 'check-ok' : 'check-fail';
+
+    toast.innerHTML = `
+      <button class="toast-close" onclick="dismissToast('${alert.auctionAddress}','${alert.stage}')">\u00D7</button>
+      <div class="toast-title">${tokenLabel} — Auction in ${timeLabel}</div>
+      <div class="${usdcCls}">${checks.usdc.ok ? '\u2713' : '\u2717'} USDC: $${checks.usdc.balance.toFixed(2)} (need $${checks.usdc.needed.toFixed(2)})</div>
+      <div class="${ethCls}">${checks.eth.ok ? '\u2713' : '\u2717'} ETH: ${checks.eth.balance.toFixed(4)} (gas)</div>
+      <div class="${configCls}">${checks.config.ok ? '\u2713' : '\u2717'} ${checks.config.description}</div>
+      <div style="margin-top:4px;font-weight:bold;color:${allGood ? 'var(--green)' : 'var(--yellow)'}">${allGood ? 'Ready to go.' : 'Action needed.'}</div>
+    `;
+    container.appendChild(toast);
+
+    // Audio beep
+    playBeep();
+
+    // Browser notification
+    if (Notification.permission === 'granted') {
+      new Notification(`${tokenLabel} — Auction in ${timeLabel}`, {
+        body: allGood ? 'Ready to go.' : 'Action needed — check wallet.',
+      });
+    } else if (Notification.permission !== 'denied' && !notifPermissionAsked) {
+      notifPermissionAsked = true;
+      Notification.requestPermission();
+    }
+
+    // Auto-dismiss passing alerts after 15s
+    if (allGood) {
+      setTimeout(() => dismissToast(alert.auctionAddress, alert.stage), 15000);
+    }
+  });
+}
+
+function dismissToast(auctionAddress, stage) {
+  const key = auctionAddress + ':' + stage;
+  const id = 'toast-' + key.replace(/[^a-zA-Z0-9]/g, '-');
+  const el = document.getElementById(id);
+  if (el) el.remove();
+  fetch('/api/readiness/dismiss', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ auctionAddress, stage }),
+  }).catch(() => {});
+}
+
 // ─── Boot ───
 async function boot() {
   // Load wallet into topbar
@@ -1163,7 +1370,8 @@ async function boot() {
   }
 }
 
-boot();
+// Auth check → boot
+checkAuth().then(ok => { if (ok) boot(); });
 
 // Keep focus on CLI input — click anywhere to refocus
 document.addEventListener('click', () => $cli.focus());
