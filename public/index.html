@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>terminal.flow.bid</title>
+<style>
+  :root {
+    --bg: #000;
+    --fg: #fff;
+    --muted: #888;
+    --dim: #555;
+    --border: #333;
+    --green: #44ff44;
+    --red: #ff4444;
+    --yellow: #ffaa44;
+    --cyan: #44ddff;
+    --bar-bg: #222;
+    --bar-fill: #fff;
+  }
+  [data-theme="light"] {
+    --bg: #fff;
+    --fg: #000;
+    --muted: #666;
+    --dim: #aaa;
+    --border: #ccc;
+    --green: #007700;
+    --red: #cc0000;
+    --yellow: #aa7700;
+    --cyan: #0077aa;
+    --bar-bg: #e0e0e0;
+    --bar-fill: #000;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Top bar */
+  .topbar {
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .topbar .title { color: var(--fg); font-size: 14px; }
+  .topbar .wallet span { color: var(--fg); }
+  .topbar button {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  .topbar button:hover { color: var(--fg); }
+
+  /* Main area: scrollable output */
+  #output {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-size: 13px;
+  }
+  #output .line { margin-bottom: 2px; }
+  #output .cmd { color: var(--cyan); }
+  #output .ok { color: var(--green); }
+  #output .err { color: var(--red); }
+  #output .warn { color: var(--yellow); }
+  #output .dim { color: var(--muted); }
+
+  /* Monitor panel — fixed below topbar */
+  #monitor {
+    flex-shrink: 0;
+    display: none; /* hidden until watching */
+    border-bottom: 1px solid var(--border);
+    max-height: 50vh;
+    overflow-y: auto;
+  }
+  #monitor.active { display: block; }
+  #monitor .monitor-expanded + .monitor-expanded,
+  #monitor .monitor-expanded + .monitor-collapsed,
+  #monitor .monitor-collapsed + .monitor-expanded,
+  #monitor .monitor-collapsed + .monitor-collapsed {
+    border-top: 1px solid var(--border);
+  }
+
+  /* Collapsed: single row */
+  .monitor-collapsed {
+    padding: 6px 16px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .monitor-collapsed:hover { background: var(--bar-bg); }
+  .monitor-collapsed .status { font-weight: bold; }
+  .monitor-collapsed .status-live { color: var(--green); }
+  .monitor-collapsed .status-waiting { color: var(--yellow); }
+  .monitor-collapsed .status-ended { color: var(--muted); }
+  .monitor-collapsed .token { color: var(--fg); }
+  .monitor-collapsed .countdown { color: var(--fg); }
+  .monitor-collapsed .stat { color: var(--muted); }
+  .monitor-collapsed .stat span { color: var(--fg); }
+  .monitor-collapsed .expand { color: var(--dim); margin-left: auto; }
+
+  /* Expanded */
+  .monitor-expanded {
+    padding: 12px 16px;
+    line-height: 1.6;
+  }
+  .monitor-expanded .head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 4px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .monitor-expanded .head:hover .collapse-hint { color: var(--fg); }
+  .monitor-expanded .status { font-weight: bold; }
+  .monitor-expanded .status-live { color: var(--green); }
+  .monitor-expanded .status-waiting { color: var(--yellow); }
+  .monitor-expanded .status-ended { color: var(--muted); }
+  .monitor-expanded .token-name { font-size: 15px; }
+  .monitor-expanded .countdown { font-size: 18px; letter-spacing: 1px; margin: 4px 0; }
+  .collapse-hint { color: var(--dim); font-size: 11px; margin-left: auto; }
+  .progress-bar {
+    height: 4px;
+    background: var(--bar-bg);
+    margin: 6px 0 2px 0;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--bar-fill);
+    transition: width 0.5s ease;
+  }
+  .progress-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .stats-row {
+    display: flex;
+    gap: 24px;
+    margin-top: 8px;
+    font-size: 12px;
+  }
+  .stats-row .label { color: var(--muted); }
+  .bids-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    margin-top: 8px;
+  }
+  .bids-table th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 400;
+    padding: 2px 8px 2px 0;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-size: 10px;
+  }
+  .bids-table td {
+    padding: 2px 8px 2px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* Input bar */
+  .inputbar {
+    border-top: 1px solid var(--border);
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .inputbar .prompt { color: var(--green); margin-right: 8px; }
+  .inputbar input {
+    flex: 1;
+    background: none;
+    border: none;
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+    caret-color: var(--fg);
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="title">terminal.flow.bid</span>
+  <span class="wallet" id="wallet"></span>
+  <button onclick="toggleTheme()" id="theme-toggle" title="Toggle theme">&#9790;</button>
+</div>
+
+<div id="monitor"></div>
+
+<div id="output"></div>
+
+<div class="inputbar">
+  <span class="prompt">&gt;</span>
+  <input type="text" id="cli" autofocus autocomplete="off" spellcheck="false"
+         placeholder="Cmd+/ for help">
+</div>
+
+<script>
+// ─── State ───
+let pollInterval = null;
+let agentState = { watching: null, status: 'idle', armedBid: null, lastResult: null };
+let launchesCache = []; // cached from last `auctions` or boot
+
+const $output = document.getElementById('output');
+const $cli = document.getElementById('cli');
+
+// ─── Resolve auction identifier (address, symbol, name, or #index) ───
+async function resolveAuction(input) {
+  if (!input) return null;
+  // If it looks like an address, use directly
+  if (input.startsWith('0x') && input.length > 10) return input;
+  // Otherwise resolve from launches
+  if (launchesCache.length === 0) {
+    const res = await fetch('/api/launches');
+    launchesCache = await res.json();
+  }
+  // Try by index (1-based)
+  const idx = parseInt(input);
+  if (!isNaN(idx) && idx >= 1 && idx <= launchesCache.length) {
+    return launchesCache[idx - 1].auction;
+  }
+  // Try by symbol or name (case-insensitive)
+  const lower = input.toLowerCase();
+  const match = launchesCache.find(l =>
+    l.tokenSymbol.toLowerCase() === lower ||
+    l.tokenName.toLowerCase().includes(lower)
+  );
+  if (match) return match.auction;
+  return null;
+}
+
+function launchLabel(l) {
+  return `${l.tokenSymbol} (${l.tokenName})`;
+}
+
+// ─── Output helpers ───
+function print(text, cls) {
+  const div = document.createElement('div');
+  div.className = 'line' + (cls ? ' ' + cls : '');
+  div.textContent = text;
+  $output.appendChild(div);
+  $output.scrollTop = $output.scrollHeight;
+}
+
+function printHtml(html) {
+  const div = document.createElement('div');
+  div.className = 'line';
+  div.innerHTML = html;
+  $output.appendChild(div);
+  $output.scrollTop = $output.scrollHeight;
+}
+
+// ─── Monitor state (per auction) ───
+const monitorCollapsed = {}; // addr -> bool
+const monitorData = {};      // addr -> { info, bids }
+
+function toggleMonitor(addr) {
+  monitorCollapsed[addr] = !monitorCollapsed[addr];
+  renderAllMonitors();
+}
+
+function renderAllMonitors() {
+  const $mon = document.getElementById('monitor');
+  const addrs = agentState.watching || [];
+  if (addrs.length === 0) {
+    $mon.classList.remove('active');
+    $mon.innerHTML = '';
+    return;
+  }
+  $mon.classList.add('active');
+  let html = '';
+  addrs.forEach(addr => {
+    const d = monitorData[addr];
+    if (!d) return;
+    html += renderOneMonitor(addr, d.info, d.bids, d.block);
+  });
+  $mon.innerHTML = html;
+}
+
+function renderOneMonitor(addr, info, bids, block) {
+  // Estimate current block by adding elapsed time since last poll
+  const elapsed = (Date.now() - lastPollTime) / 1000;
+  const currentBlock = block.blockNumber + Math.floor(elapsed / 2);
+  const startBlock = parseInt(info.startBlock) || 0;
+  const endBlock = parseInt(info.endBlock) || (startBlock + 270);
+  const duration = endBlock - startBlock;
+
+  let status, statusCls;
+  if (currentBlock < startBlock) {
+    status = 'WAITING';
+    statusCls = 'status-waiting';
+  } else if (currentBlock < endBlock) {
+    status = 'LIVE';
+    statusCls = 'status-live';
+  } else {
+    status = 'ENDED';
+    statusCls = 'status-ended';
+  }
+
+  const tokenName = info.tokenName || info.name || info.token?.name || '';
+  const tokenSymbol = info.tokenSymbol || info.symbol || info.token?.symbol || '';
+
+  let countdownShort = '';
+  let countdownFull = '';
+  if (status === 'WAITING') {
+    const left = startBlock - currentBlock;
+    countdownShort = fmtTime(left * 2);
+    countdownFull = `starts in ${countdownShort}  (${left} blocks)`;
+  } else if (status === 'LIVE') {
+    const left = endBlock - currentBlock;
+    countdownShort = fmtTime(left * 2);
+    countdownFull = `${countdownShort} remaining  (${left} blocks)`;
+  } else {
+    countdownShort = 'ended';
+    countdownFull = 'auction ended';
+  }
+
+  let progress = 0;
+  if (status === 'LIVE') progress = Math.min(100, ((currentBlock - startBlock) / duration) * 100);
+  else if (status === 'ENDED') progress = 100;
+
+  const bidList = Array.isArray(bids) ? bids : [];
+  const totalBids = bidList.length;
+  const bidders = new Set(bidList.map(b => b.bidder || b.sender || b.from || '')).size;
+  const raised = bidList.reduce((s, b) => {
+    const a = parseFloat(b.amount || b.amountUsd || b.amountRaw || 0);
+    return s + (isNaN(a) ? 0 : a);
+  }, 0);
+
+  const clearingPrice = info.clearingPrice || info.currentPrice || null;
+  const fdv = info.fdv || info.impliedFdv || info.currentFdv || null;
+  const armedBids = agentState.armedBids || [];
+  const armedBid = armedBids.find(b => b.auctionAddress === addr);
+  const isArmed = !!armedBid;
+
+  // Escaped addr for onclick
+  const esc = addr.replace(/'/g, "\\'");
+
+  // ── Collapsed ──
+  if (monitorCollapsed[addr]) {
+    let h = `<div class="monitor-collapsed" onclick="toggleMonitor('${esc}')">`;
+    h += `<span class="status ${statusCls}">${status}</span>`;
+    h += `<span class="token">${tokenSymbol || tokenName}</span>`;
+    h += `<span class="countdown">${countdownShort}</span>`;
+    h += `<span class="stat"><span class="label">bids </span><span>${totalBids}</span></span>`;
+    h += `<span class="stat"><span class="label">raised </span><span>${fmtUsd(raised)}</span></span>`;
+    if (fdv) h += `<span class="stat"><span class="label">fdv </span><span>${fmtUsd(fdv)}</span></span>`;
+    if (isArmed) h += `<span style="color:var(--green)">ARMED</span>`;
+    h += `<span class="expand">&#9660;</span>`;
+    h += `</div>`;
+    return h;
+  }
+
+  // ── Expanded ──
+  let h = `<div class="monitor-expanded">`;
+  h += `<div class="head" onclick="toggleMonitor('${esc}')">`;
+  h += `<span class="status ${statusCls}">${status}</span>`;
+  h += `<span class="token-name">${tokenName}</span>`;
+  if (tokenSymbol) h += `<span style="color:var(--muted)">$${tokenSymbol}</span>`;
+  if (isArmed) {
+    h += `<span style="color:var(--green)">[ARMED ${armedBid.amount} USDC @ $${fmtUsd(armedBid.maxFdvUsd)} FDV]</span>`;
+  }
+  h += `<span class="collapse-hint">&#9650;</span>`;
+  h += `</div>`;
+
+  h += `<div class="countdown">${countdownFull}</div>`;
+  h += `<div class="progress-bar"><div class="progress-fill" style="width:${progress}%"></div></div>`;
+  h += `<div class="progress-labels"><span>${startBlock.toLocaleString()}</span><span>${currentBlock.toLocaleString()}</span><span>${endBlock.toLocaleString()}</span></div>`;
+
+  h += `<div class="stats-row">`;
+  h += `<span><span class="label">bids</span> ${totalBids}</span>`;
+  h += `<span><span class="label">bidders</span> ${bidders}</span>`;
+  h += `<span><span class="label">raised</span> ${fmtUsd(raised)}</span>`;
+  if (clearingPrice) h += `<span><span class="label">price</span> $${clearingPrice}</span>`;
+  if (fdv) h += `<span><span class="label">fdv</span> ${fmtUsd(fdv)}</span>`;
+  h += `</div>`;
+
+  if (bidList.length > 0) {
+    h += `<table class="bids-table"><tr><th>block</th><th>bidder</th><th>amount</th><th>max fdv</th></tr>`;
+    bidList.slice(-8).reverse().forEach(b => {
+      const ba = b.bidder || b.sender || b.from || '—';
+      const short = ba.length > 10 ? ba.slice(0, 6) + '..' + ba.slice(-4) : ba;
+      const amt = b.amount || b.amountUsd || b.amountRaw || '—';
+      const mf = b.maxFdvUsd || b.maxFdv || null;
+      const blk = b.blockNumber || b.block || '—';
+      h += `<tr><td>${blk}</td><td>${short}</td><td>${amt}</td><td>${mf ? fmtUsd(mf) : '—'}</td></tr>`;
+    });
+    h += `</table>`;
+  }
+
+  h += `</div>`;
+  return h;
+}
+
+// For one-shot info command (renders into output, not the pinned monitor)
+function printMonitorToOutput(info, bids, block) {
+  const html = renderOneMonitor('_oneshot', info, bids, block);
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  $output.appendChild(div);
+  $output.scrollTop = $output.scrollHeight;
+}
+
+// ─── Formatting ───
+function fmtTime(seconds) {
+  if (seconds <= 0) return 'now';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const parts = [];
+  if (h > 0) parts.push(h + 'h');
+  if (m > 0) parts.push(m + 'm');
+  parts.push(s + 's');
+  return parts.join(' ');
+}
+
+function fmtUsd(n) {
+  const num = typeof n === 'string' ? parseFloat(n) : n;
+  if (isNaN(num)) return String(n);
+  if (num >= 1_000_000) return '$' + (num / 1_000_000).toFixed(2) + 'M';
+  if (num >= 1_000) return '$' + (num / 1_000).toFixed(1) + 'K';
+  return '$' + num.toFixed(2);
+}
+
+function shortAddr(a) {
+  return a && a.length > 14 ? a.slice(0, 6) + '...' + a.slice(-4) : a;
+}
+
+// ─── Polling (all watched auctions) ───
+let tickInterval = null;
+let lastPollTime = Date.now();
+
+function startPolling() {
+  stopPolling();
+  pollAll();
+  pollInterval = setInterval(pollAll, 3000);
+  // 1-second local ticker for smooth countdowns
+  tickInterval = setInterval(renderAllMonitors, 1000);
+}
+
+function stopPolling() {
+  if (pollInterval) clearInterval(pollInterval);
+  if (tickInterval) clearInterval(tickInterval);
+  pollInterval = null;
+  tickInterval = null;
+}
+
+async function pollAll() {
+  try {
+    const [agentRes, blockRes] = await Promise.all([
+      fetch('/api/agent'),
+      fetch('/api/block'),
+    ]);
+    agentState = await agentRes.json();
+    const block = await blockRes.json();
+    const addrs = agentState.watching || [];
+
+    if (addrs.length === 0) {
+      stopPolling();
+      renderAllMonitors();
+      return;
+    }
+
+    // Fetch info + bids for all watched auctions in parallel
+    const results = await Promise.all(addrs.map(async addr => {
+      const [infoRes, bidsRes] = await Promise.all([
+        fetch(`/api/auction/${addr}`),
+        fetch(`/api/auction/${addr}/bids`),
+      ]);
+      const [info, bids] = await Promise.all([infoRes.json(), bidsRes.json()]);
+      return { addr, info, bids };
+    }));
+
+    results.forEach(({ addr, info, bids }) => {
+      monitorData[addr] = { info, bids, block };
+    });
+
+    lastPollTime = Date.now();
+    renderAllMonitors();
+  } catch (e) {
+    print('poll error: ' + e.message, 'err');
+  }
+}
+
+// ─── Keyboard shortcuts ───
+let helpVisible = false;
+document.addEventListener('keydown', (e) => {
+  if (!e.metaKey && !e.ctrlKey) return;
+  const key = e.key.toLowerCase();
+  switch (key) {
+    case 'k': e.preventDefault(); $output.innerHTML = ''; helpVisible = false; break;
+    case 'l': e.preventDefault(); runCmd('auctions'); break;
+    case 'j': e.preventDefault(); runCmd('status'); break;
+    case 'w': e.preventDefault(); runCmd('wallet'); break;
+    case 'b': e.preventDefault(); runCmd('bids'); break;
+    case 'm':
+      e.preventDefault();
+      const addrs = agentState.watching || [];
+      if (addrs.length > 0) {
+        const allCollapsed = addrs.every(a => monitorCollapsed[a]);
+        addrs.forEach(a => monitorCollapsed[a] = !allCollapsed);
+        renderAllMonitors();
+      }
+      break;
+    case '/':
+      e.preventDefault();
+      if (helpVisible) {
+        // Remove the help block
+        const hb = document.getElementById('help-block');
+        if (hb) hb.remove();
+        helpVisible = false;
+      } else {
+        runCmd('help');
+        helpVisible = true;
+      }
+      break;
+  }
+});
+
+// ─── CLI ───
+$cli.addEventListener('keydown', async (e) => {
+  if (e.key !== 'Enter') return;
+  const raw = $cli.value.trim();
+  $cli.value = '';
+  if (!raw) return;
+
+  print('> ' + raw, 'cmd');
+  await runCmd(raw);
+});
+
+async function runCmd(raw) {
+  const parts = raw.split(/\s+/);
+  const cmd = parts[0].toLowerCase();
+
+  try {
+    switch (cmd) {
+      case 'help': {
+        const old = document.getElementById('help-block');
+        if (old) old.remove();
+        const helpDiv = document.createElement('div');
+        helpDiv.id = 'help-block';
+        const lines = [
+          '',
+          '  auctions           list all auctions          Cmd+L',
+          '  watch <id>         watch auction (symbol, #, or addr)',
+          '  unwatch            stop watching',
+          '  arm <fdv> <amt>    schedule bid for auction start',
+          '  disarm             cancel scheduled bid',
+          '  bid <fdv> <amt>    bid now on watched auction',
+          '  info <id>          one-shot auction lookup',
+          '  status             show agent state            Cmd+J',
+          '  bids               show your bid history       Cmd+B',
+          '  wallet             show wallet info            Cmd+W',
+          '  clear              clear output                Cmd+K',
+          '  help               this message                Cmd+/',
+          '',
+        ];
+        lines.forEach(l => {
+          const d = document.createElement('div');
+          d.className = 'line';
+          d.textContent = l;
+          helpDiv.appendChild(d);
+        });
+        $output.appendChild(helpDiv);
+        $output.scrollTop = $output.scrollHeight;
+        helpVisible = true;
+        break;
+      }
+
+      case 'auctions':
+      case 'ls': {
+        print('fetching launches...', 'dim');
+        const lRes = await fetch('/api/launches');
+        const launches = await lRes.json();
+        if (launches.error) throw new Error(launches.error);
+        launchesCache = launches;
+        const blockRes = await fetch('/api/block');
+        const block = await blockRes.json();
+        const cur = block.blockNumber;
+        print('');
+        launches.forEach((l, i) => {
+          const start = parseInt(l.startBlock);
+          const end = parseInt(l.endBlock);
+          let statusStr;
+          if (cur < start) {
+            const left = start - cur;
+            statusStr = `starts in ${fmtTime(left * 2)}`;
+          } else if (cur < end) {
+            const left = end - cur;
+            statusStr = `LIVE  ${fmtTime(left * 2)} left`;
+          } else {
+            statusStr = l.isGraduated ? 'graduated' : 'ended';
+          }
+          const line = `  ${String(i + 1).padStart(2)}  ${l.tokenSymbol.padEnd(10)} ${l.tokenName.slice(0, 25).padEnd(25)}  ${statusStr}`;
+          const cls = cur < start ? 'warn' : cur < end ? 'ok' : 'dim';
+          print(line, cls);
+        });
+        print('');
+        print('use: watch <symbol>, watch <#>, or watch <addr>', 'dim');
+        print('');
+        break;
+      }
+
+      case 'watch': {
+        const input = parts[1];
+        if (!input) { print('usage: watch <symbol | # | addr>', 'err'); break; }
+        const addr = await resolveAuction(input);
+        if (!addr) { print(`could not find auction: ${input}`, 'err'); break; }
+        const match = launchesCache.find(l => l.auction === addr);
+        const res = await fetch('/api/agent/watch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ auctionAddress: addr }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        agentState = data;
+        print(`watching ${match ? launchLabel(match) : shortAddr(addr)}`, 'ok');
+        startPolling();
+        break;
+      }
+
+      case 'unwatch':
+      case 'stop': {
+        const input = parts[1];
+        if (input) {
+          // Unwatch specific auction
+          const addr = await resolveAuction(input);
+          if (!addr) { print(`could not find auction: ${input}`, 'err'); break; }
+          const res = await fetch('/api/agent/unwatch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ auctionAddress: addr }),
+          });
+          agentState = await res.json();
+          delete monitorData[addr];
+          const match = launchesCache.find(l => l.auction === addr);
+          print(`unwatched ${match ? launchLabel(match) : shortAddr(addr)}`, 'dim');
+        } else {
+          // Unwatch all
+          const res = await fetch('/api/agent/unwatch', { method: 'POST' });
+          agentState = await res.json();
+          Object.keys(monitorData).forEach(k => delete monitorData[k]);
+          print('stopped watching all', 'dim');
+        }
+        if (agentState.watching.length === 0) stopPolling();
+        renderAllMonitors();
+        break;
+      }
+
+      case 'arm': {
+        // arm <auction> <fdv> <amt> OR arm <fdv> <amt> (uses first watched)
+        let auctionAddr, fdv, amt;
+        if (parts.length >= 4) {
+          auctionAddr = await resolveAuction(parts[1]);
+          fdv = parts[2]; amt = parts[3];
+        } else {
+          fdv = parts[1]; amt = parts[2];
+          auctionAddr = agentState.watching?.[0];
+        }
+        if (!fdv || !amt) { print('usage: arm [auction] <fdv> <amt>', 'err'); break; }
+        if (!auctionAddr) { print('no auction specified or watched', 'err'); break; }
+        print('arming agent...', 'dim');
+        const res = await fetch('/api/bid/schedule', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            auctionAddress: auctionAddr,
+            maxFdvUsd: Number(fdv),
+            amount: Number(amt),
+          }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        const match = launchesCache.find(l => l.auction === auctionAddr);
+        print(`armed ${match ? match.tokenSymbol : shortAddr(auctionAddr)} — ${amt} USDC @ $${fmtUsd(Number(fdv))} FDV`, 'ok');
+        break;
+      }
+
+      case 'disarm': {
+        // TODO: proper disarm via cancel endpoint
+        print('disarmed (note: server-side scheduled bid may still execute)', 'warn');
+        break;
+      }
+
+      case 'bid': {
+        // bid <auction> <fdv> <amt> OR bid <fdv> <amt> (uses first watched)
+        let auctionAddr, fdv, amt;
+        if (parts.length >= 4) {
+          auctionAddr = await resolveAuction(parts[1]);
+          fdv = parts[2]; amt = parts[3];
+        } else {
+          fdv = parts[1]; amt = parts[2];
+          auctionAddr = agentState.watching?.[0];
+        }
+        if (!fdv || !amt) { print('usage: bid [auction] <fdv> <amt>', 'err'); break; }
+        if (!auctionAddr) { print('no auction specified or watched', 'err'); break; }
+        print('submitting bid...', 'dim');
+        const res = await fetch('/api/bid', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            auctionAddress: auctionAddr,
+            maxFdvUsd: Number(fdv),
+            amount: Number(amt),
+          }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        const match = launchesCache.find(l => l.auction === auctionAddr);
+        print(`bid confirmed on ${match ? match.tokenSymbol : shortAddr(auctionAddr)}`, 'ok');
+        if (data.txHashes) {
+          data.txHashes.forEach((h, i) => {
+            printHtml(`  tx ${i + 1}: <a href="https://basescan.org/tx/${h}" target="_blank" style="color:var(--cyan)">${h.slice(0, 10)}...${h.slice(-8)}</a>`);
+          });
+        }
+        break;
+      }
+
+      case 'info': {
+        const input = parts[1];
+        if (!input) { print('usage: info <symbol | # | addr>', 'err'); break; }
+        const addr = await resolveAuction(input);
+        if (!addr) { print(`could not find auction: ${input}`, 'err'); break; }
+        print('fetching...', 'dim');
+        const [infoRes, bidsRes, blockRes] = await Promise.all([
+          fetch(`/api/auction/${addr}`),
+          fetch(`/api/auction/${addr}/bids`),
+          fetch('/api/block'),
+        ]);
+        const [info, bids, block] = await Promise.all([
+          infoRes.json(), bidsRes.json(), blockRes.json(),
+        ]);
+        if (info.error) throw new Error(info.error);
+        printMonitorToOutput(info, bids, block);
+        break;
+      }
+
+      case 'status': {
+        const res = await fetch('/api/agent');
+        agentState = await res.json();
+        print(`status:   ${agentState.status}`);
+        const w = agentState.watching || [];
+        if (w.length === 0) {
+          print('watching: none');
+        } else {
+          w.forEach(addr => {
+            const match = launchesCache.find(l => l.auction === addr);
+            print(`watching: ${match ? launchLabel(match) : shortAddr(addr)}`);
+          });
+        }
+        (agentState.armedBids || []).forEach(ab => {
+          const match = launchesCache.find(l => l.auction === ab.auctionAddress);
+          print(`armed:    ${ab.amount} USDC @ $${fmtUsd(ab.maxFdvUsd)} FDV on ${match ? match.tokenSymbol : shortAddr(ab.auctionAddress)}`);
+        });
+        if (agentState.lastResult) {
+          const r = agentState.lastResult;
+          const ago = Math.round((Date.now() - r.timestamp) / 1000);
+          print(`last:     ${r.message} (${ago}s ago)`, r.type === 'error' ? 'err' : 'ok');
+        }
+        break;
+      }
+
+      case 'bids': {
+        const res = await fetch('/api/bids');
+        const bids = await res.json();
+        if (bids.error) throw new Error(bids.error);
+        if (!Array.isArray(bids) || bids.length === 0) {
+          print('no bids found', 'dim');
+          break;
+        }
+        bids.forEach(b => {
+          const addr = shortAddr(b.auctionAddress || b.auction || '—');
+          const amt = b.amount || b.amountRaw || '—';
+          const fdv = b.maxFdvUsd || b.maxFdv || '—';
+          const st = b.status || '—';
+          print(`  ${addr}  ${amt} USDC  FDV ${fdv}  ${st}`);
+        });
+        break;
+      }
+
+      case 'wallet': {
+        const res = await fetch('/api/wallet');
+        const w = await res.json();
+        if (w.error) throw new Error(w.error);
+        print(`  ${w.address}`);
+        print(`  ETH: ${parseFloat(w.ethBalance).toFixed(6)}  USDC: ${parseFloat(w.usdcBalance).toFixed(2)}`);
+        break;
+      }
+
+      case 'clear':
+        $output.innerHTML = '';
+        break;
+
+      default:
+        print(`unknown command: ${cmd} — type help`, 'err');
+    }
+  } catch (e) {
+    print(e.message, 'err');
+  }
+}
+
+// ─── Theme ───
+function toggleTheme() {
+  const html = document.documentElement;
+  const isLight = html.getAttribute('data-theme') === 'light';
+  if (isLight) {
+    html.removeAttribute('data-theme');
+    localStorage.setItem('theme', 'dark');
+    document.getElementById('theme-toggle').textContent = '\u263E';
+  } else {
+    html.setAttribute('data-theme', 'light');
+    localStorage.setItem('theme', 'light');
+    document.getElementById('theme-toggle').textContent = '\u2600';
+  }
+}
+
+(function initTheme() {
+  const saved = localStorage.getItem('theme');
+  if (saved === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light');
+    document.getElementById('theme-toggle').textContent = '\u2600';
+  } else {
+    document.getElementById('theme-toggle').textContent = '\u263E';
+  }
+})();
+
+// ─── Boot ───
+async function boot() {
+  // Load wallet into topbar
+  try {
+    const res = await fetch('/api/wallet');
+    const w = await res.json();
+    if (!w.error) {
+      document.getElementById('wallet').innerHTML =
+        `<span>${shortAddr(w.address)}</span> ETH: <span>${parseFloat(w.ethBalance).toFixed(4)}</span> USDC: <span>${parseFloat(w.usdcBalance).toFixed(2)}</span>`;
+    }
+  } catch {}
+
+  // Load launches + agent state in parallel
+  try {
+    const [agentRes, launchesRes] = await Promise.all([
+      fetch('/api/agent'),
+      fetch('/api/launches'),
+    ]);
+    agentState = await agentRes.json();
+    launchesCache = await launchesRes.json();
+  } catch {}
+
+  print('terminal.flow.bid', 'dim');
+  print('');
+
+  const watching = agentState.watching || [];
+  if (watching.length > 0) {
+    watching.forEach(addr => {
+      const match = launchesCache.find(l => l.auction === addr);
+      print(`resuming watch on ${match ? launchLabel(match) : shortAddr(addr)}`, 'ok');
+    });
+    if (agentState.status === 'armed' && agentState.armedBids?.length) {
+      agentState.armedBids.forEach(ab => {
+        const m = launchesCache.find(l => l.auction === ab.auctionAddress);
+        print(`agent armed: ${m ? m.tokenSymbol : shortAddr(ab.auctionAddress)} — ${ab.amount} USDC @ $${fmtUsd(ab.maxFdvUsd)} FDV`, 'warn');
+      });
+    }
+    startPolling();
+  } else {
+    print('agent idle — type auctions or help', 'dim');
+  }
+}
+
+boot();
+
+// Keep focus on CLI input — click anywhere to refocus
+document.addEventListener('click', () => $cli.focus());
+document.addEventListener('keydown', (e) => {
+  if (document.activeElement !== $cli) {
+    $cli.focus();
+  }
+});
+</script>
+</body>
+</html>
