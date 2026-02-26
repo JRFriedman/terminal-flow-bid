@@ -354,7 +354,7 @@ app.post("/api/launch", async (req, res) => {
       value: result.value ? BigInt(result.value) : 0n,
       account,
       chain: walletClient.chain,
-      gas: 2_000_000n,
+      gas: 10_000_000n,
     });
 
     console.log(`  TX hash: ${hash}`);
