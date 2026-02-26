@@ -76,16 +76,52 @@ export function startTelegramBot(): void {
 
   bot = new Bot(token);
 
+  // Register command menu
+  bot.api.setMyCommands([
+    { command: "auctions", description: "List all auctions" },
+    { command: "wallet", description: "Show wallet balances" },
+    { command: "status", description: "Show agent state" },
+    { command: "strategies", description: "Show active strategies" },
+    { command: "exits", description: "Show exit strategies" },
+    { command: "help", description: "Show all commands" },
+  ]).catch((err) => console.error("[telegram] setMyCommands failed:", err.message));
+
   bot.command("start", (ctx) =>
     ctx.reply(
-      "Flow Terminal Bot\n\nSend commands like you would in the terminal:\nauctions, watch, strategy, bid, wallet, status, help"
+      "Flow Terminal Bot\n\nSend commands like you would in the terminal, or use the / menu."
     )
   );
 
-  // Handle all text messages as CLI commands
+  // Handle slash commands — strip the / and route to handleCommand
+  for (const cmd of ["auctions", "wallet", "status", "strategies", "exits", "help"]) {
+    bot.command(cmd, async (ctx) => {
+      try {
+        const args = ctx.match ? `${cmd} ${ctx.match}` : cmd;
+        const reply = await handleCommand(args);
+        await ctx.reply(reply, { parse_mode: "Markdown" });
+      } catch (err: any) {
+        await ctx.reply(`Error: ${err.message}`);
+      }
+    });
+  }
+
+  // Commands that take arguments
+  for (const cmd of ["watch", "unwatch", "info", "arm", "disarm", "bid", "strategy", "cancel", "exit", "exit-cancel"]) {
+    bot.command(cmd.replace("-", "_"), async (ctx) => {
+      try {
+        const args = ctx.match ? `${cmd} ${ctx.match}` : cmd;
+        const reply = await handleCommand(args);
+        await ctx.reply(reply, { parse_mode: "Markdown" });
+      } catch (err: any) {
+        await ctx.reply(`Error: ${err.message}`);
+      }
+    });
+  }
+
+  // Handle plain text messages as CLI commands
   bot.on("message:text", async (ctx) => {
     const raw = ctx.message.text.trim();
-    if (raw.startsWith("/")) return; // ignore unknown slash commands
+    if (raw.startsWith("/")) return; // already handled above
 
     try {
       const reply = await handleCommand(raw);
