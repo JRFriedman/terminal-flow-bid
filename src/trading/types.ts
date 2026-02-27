@@ -10,6 +10,7 @@ export interface Trade {
   amountToken: number;
   price: number;
   txHash: string;
+  gasCostEth?: number;
 }
 
 export interface Position {
@@ -39,6 +40,7 @@ export interface TradingStrategyState {
   priceHistory: PricePoint[];  // last 24h, kept lean
   trades: Trade[];
   pnl: { realized: number; unrealized: number };
+  totalGasCostEth: number;
   riskLimits: RiskLimits;
   params: Record<string, any>;  // strategy-specific
   log: Array<{ time: number; message: string; type: "info" | "trade" | "error" }>;

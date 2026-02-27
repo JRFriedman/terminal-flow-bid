@@ -179,6 +179,10 @@
   .strategy-btn:hover { color: var(--fg); }
   .strategy-btn.remove:hover { color: var(--red); }
   .strategy-actions { margin-left: auto; display: flex; gap: 2px; align-items: center; }
+  .sell-buttons { display: flex; gap: 4px; margin-top: 6px; }
+  .sell-btn { background: var(--bar-bg); border: 1px solid var(--border); border-radius: 3px; color: var(--muted); font-size: 11px; padding: 3px 10px; cursor: pointer; }
+  .sell-btn:hover { color: var(--red); border-color: var(--red); }
+  .sell-btn.selling { color: var(--yellow); border-color: var(--yellow); cursor: wait; }
   .progress-bar {
     height: 4px;
     background: var(--bar-bg);
@@ -329,6 +333,7 @@
   <div class="tab" data-tab="trade" onclick="switchTab('trade')">TRADE</div>
   <div class="tab" data-tab="flow" onclick="switchTab('flow')">FLOW</div>
   <div class="tab" data-tab="portfolio" onclick="switchTab('portfolio')">PORTFOLIO</div>
+  <div class="tab" data-tab="history" onclick="switchTab('history')">HISTORY</div>
 </div>
 
 <div class="tab-content" id="tab-trade">
@@ -342,6 +347,9 @@
 <div class="tab-content" id="tab-portfolio">
   <div id="monitor-portfolio" class="tab-monitor"></div>
   <div id="output-portfolio" class="tab-output"></div>
+</div>
+<div class="tab-content" id="tab-history">
+  <div id="history-content" class="tab-output"></div>
 </div>
 
 <div id="toast-container"></div>
@@ -404,6 +412,7 @@ let launchesCache = []; // cached from last `auctions` or boot
 let strategiesCache = []; // cached from last poll
 let exitStrategiesCache = []; // cached from last poll
 let tradingStrategiesCache = []; // cached from last poll
+let ethPriceUsd = 2500; // ETH/USD price for gas fee display, updated from topbar
 let lastSuggestions = []; // last suggest command results for numeric selection
 let activeTab = localStorage.getItem('activeTab') || 'trade';
 
@@ -422,6 +431,7 @@ const $outputs = {
   flow: document.getElementById('output-flow'),
   trade: document.getElementById('output-trade'),
   portfolio: document.getElementById('output-portfolio'),
+  history: document.getElementById('history-content'),
 };
 const $monitors = {
   flow: document.getElementById('monitor-flow'),
@@ -442,6 +452,7 @@ function switchTab(name) {
   });
   const $out = $outputs[name];
   if ($out) $out.scrollTop = $out.scrollHeight;
+  if (name === 'history') renderHistory();
   $cli.focus();
 }
 
@@ -453,12 +464,12 @@ const TAB_COMMANDS = {
   flow: new Set(['auctions','ls','watch','unwatch','stop','arm','disarm','bid',
     'strategy','strategies','cancel','exit','exits','exit-cancel',
     'claim','claim-all','launch','info','price']),
-  trade: new Set(['trade','trades','trade-cancel','trade-remove','trade-pause','trade-resume','suggest']),
+  trade: new Set(['trade','trades','trade-cancel','trade-remove','trade-pause','trade-resume','liquidate','suggest']),
   portfolio: new Set(['wallet','bids']),
 };
 const GLOBAL_COMMANDS = new Set(['help','status','clear']);
-const TAB_LABELS = { flow: 'Flow', trade: 'Trade', portfolio: 'Portfolio' };
-const TAB_KEYS = { trade: '1', flow: '2', portfolio: '3' };
+const TAB_LABELS = { flow: 'Flow', trade: 'Trade', portfolio: 'Portfolio', history: 'History' };
+const TAB_KEYS = { trade: '1', flow: '2', portfolio: '3', history: '4' };
 
 function commandTab(cmd) {
   for (const [tab, cmds] of Object.entries(TAB_COMMANDS)) {
@@ -560,6 +571,23 @@ async function removeStrategy(id, ev) {
   } catch (e) {
     print('remove failed: ' + e.message, 'err');
   }
+}
+
+async function sellPosition(id, pct, btn) {
+  if (btn) { btn.classList.add('selling'); btn.textContent = 'selling...'; }
+  try {
+    const res = await fetch(`/api/trading-strategy/${id}/sell`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pct }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    print(`sold ${data.sold}`, 'ok');
+  } catch (e) {
+    print('sell failed: ' + e.message, 'err');
+  }
+  if (btn) { btn.classList.remove('selling'); btn.textContent = pct === 100 ? 'ALL' : pct + '%'; }
 }
 
 function renderAllMonitors() {
@@ -707,11 +735,14 @@ function renderTradingStrategies() {
     const collapsed = collapsedStrategies.has(s.id);
 
     if (collapsed) {
+      const cGasUsd = (s.totalGasCostEth || 0) * ethPriceUsd;
+      const cTruePnl = pnlTotal - cGasUsd;
+      const cTruePnlColor = cTruePnl >= 0 ? 'var(--green)' : 'var(--red)';
       h += `<div class="monitor-collapsed" onclick="toggleStrategy('${eid}')">`;
       h += `<span class="status" style="color:${statusColor}">${s.status.toUpperCase()}</span>`;
       h += `<span class="token">${s.type.toUpperCase()} ${s.tokenSymbol}</span>`;
       h += `<span class="stat"><span class="label">#</span><span>${s.id}</span></span>`;
-      h += `<span style="color:${pnlColor}" class="stat"><span class="label">pnl </span><span>${pnlTotal >= 0 ? '+' : ''}${fmtUsd(pnlTotal)}</span></span>`;
+      h += `<span style="color:${cTruePnlColor}" class="stat"><span class="label">pnl </span><span>${cTruePnl >= 0 ? '+' : ''}${fmtUsd(cTruePnl)}</span></span>`;
       h += `<button class="strategy-btn remove" onclick="removeStrategy('${eid}', event)" title="Remove strategy">&#10005;</button>`;
       h += `<span class="expand">&#9660;</span>`;
       h += `</div>`;
@@ -736,11 +767,33 @@ function renderTradingStrategies() {
     h += `</div>`;
 
     h += `<div class="stats-row">`;
+    const gasEth = s.totalGasCostEth || 0;
+    const gasUsd = gasEth * ethPriceUsd;
+    const truePnl = pnlTotal - gasUsd;
+    const truePnlColor = truePnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const truePnlPct = s.position.totalInvested > 0 ? (truePnl / s.position.totalInvested * 100) : 0;
+
     h += `<span><span class="label">invested</span> ${fmtUsd(s.position.totalInvested)}</span>`;
     h += `<span><span class="label">realized</span> ${fmtUsd(s.position.totalRealized)}</span>`;
     h += `<span><span class="label">trades</span> ${s.trades.length}</span>`;
     h += `<span style="color:var(--red)"><span class="label">stop-loss</span> ${s.riskLimits.stopLossPercent}%</span>`;
     h += `</div>`;
+
+    h += `<div class="stats-row">`;
+    h += `<span style="color:var(--yellow)"><span class="label">gas fees</span> ${gasEth.toFixed(5)} ETH (~${fmtUsd(gasUsd)})</span>`;
+    h += `<span style="color:${truePnlColor}"><span class="label">true pnl</span> ${truePnl >= 0 ? '+' : ''}${fmtUsd(truePnl)} (${truePnlPct >= 0 ? '+' : ''}${truePnlPct.toFixed(1)}%)</span>`;
+    h += `</div>`;
+
+    // Sell buttons (only if there's a position)
+    if (s.position.tokenBalance > 0) {
+      h += `<div class="sell-buttons">`;
+      h += `<span class="label" style="line-height:22px">sell</span>`;
+      for (const pct of [25, 50, 75, 100]) {
+        const label = pct === 100 ? 'ALL' : pct + '%';
+        h += `<button class="sell-btn" onclick="sellPosition('${eid}', ${pct}, this)">${label}</button>`;
+      }
+      h += `</div>`;
+    }
 
     // Sparkline from price history
     if (s.priceHistory.length > 1) {
@@ -762,6 +815,81 @@ function renderTradingStrategies() {
     h += `</div>`;
   });
   return h;
+}
+
+function renderHistory() {
+  const $el = document.getElementById('history-content');
+  if (!$el) return;
+  if (!tradingStrategiesCache.length) {
+    $el.innerHTML = '<div class="line dim">no trade history</div>';
+    return;
+  }
+
+  let h = '';
+
+  // Summary across all strategies
+  let totalInvested = 0, totalRealized = 0, totalGasEth = 0, totalTrades = 0;
+  tradingStrategiesCache.forEach(s => {
+    totalInvested += s.position.totalInvested;
+    totalRealized += s.position.totalRealized;
+    totalGasEth += s.totalGasCostEth || 0;
+    totalTrades += s.trades.length;
+  });
+  const totalGasUsd = totalGasEth * ethPriceUsd;
+  const rawPnl = totalRealized - totalInvested;
+  const truePnl = rawPnl - totalGasUsd;
+  const truePnlColor = truePnl >= 0 ? 'var(--green)' : 'var(--red)';
+
+  h += `<div style="margin-bottom:12px;line-height:1.8">`;
+  h += `<div><span class="label" style="color:var(--muted)">SUMMARY</span></div>`;
+  h += `<div><span class="label">total invested</span> ${fmtUsd(totalInvested)}</div>`;
+  h += `<div><span class="label">total realized</span> ${fmtUsd(totalRealized)}</div>`;
+  h += `<div><span class="label">raw pnl</span> <span style="color:${rawPnl >= 0 ? 'var(--green)' : 'var(--red)'}">${rawPnl >= 0 ? '+' : ''}${fmtUsd(rawPnl)}</span></div>`;
+  h += `<div><span class="label">gas fees</span> <span style="color:var(--yellow)">${totalGasEth.toFixed(5)} ETH (~${fmtUsd(totalGasUsd)})</span></div>`;
+  h += `<div><span class="label">true pnl</span> <span style="color:${truePnlColor};font-weight:bold">${truePnl >= 0 ? '+' : ''}${fmtUsd(truePnl)}</span></div>`;
+  h += `<div><span class="label">total trades</span> ${totalTrades}</div>`;
+  h += `</div>`;
+
+  // Per-strategy breakdown
+  tradingStrategiesCache.forEach(s => {
+    const gasEth = s.totalGasCostEth || 0;
+    const gasUsd = gasEth * ethPriceUsd;
+    const sPnl = s.pnl.realized + s.pnl.unrealized;
+    const sTruePnl = sPnl - gasUsd;
+    const sTrueColor = sTruePnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const statusColor = s.status === 'running' ? 'var(--green)' : s.status === 'paused' ? 'var(--yellow)' : 'var(--muted)';
+
+    h += `<div style="border-top:1px solid var(--border);padding:8px 0;line-height:1.6">`;
+    h += `<div><span style="color:${statusColor};font-weight:bold">${s.status.toUpperCase()}</span> ${s.type.toUpperCase()} ${s.tokenSymbol} <span style="color:var(--muted)">#${s.id}</span></div>`;
+    h += `<div><span class="label">invested</span> ${fmtUsd(s.position.totalInvested)}`;
+    h += `  <span class="label">realized</span> ${fmtUsd(s.position.totalRealized)}`;
+    h += `  <span class="label">gas</span> <span style="color:var(--yellow)">${gasEth.toFixed(5)} ETH (~${fmtUsd(gasUsd)})</span>`;
+    h += `  <span class="label">true pnl</span> <span style="color:${sTrueColor}">${sTruePnl >= 0 ? '+' : ''}${fmtUsd(sTruePnl)}</span></div>`;
+
+    // Trade list
+    if (s.trades.length > 0) {
+      h += `<table style="font-size:11px;width:100%;margin-top:4px;border-collapse:collapse">`;
+      h += `<tr style="color:var(--muted)"><td>time</td><td>side</td><td>amount</td><td>price</td><td>gas</td><td>tx</td></tr>`;
+      s.trades.slice().reverse().forEach(t => {
+        const sideColor = t.side === 'buy' ? 'var(--green)' : 'var(--red)';
+        const time = new Date(t.timestamp).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        const gasStr = t.gasCostEth ? `${t.gasCostEth.toFixed(5)}` : '-';
+        h += `<tr>`;
+        h += `<td style="color:var(--muted)">${time}</td>`;
+        h += `<td style="color:${sideColor}">${t.side.toUpperCase()}</td>`;
+        h += `<td>${fmtUsd(t.amountUsdc)} / ${fmtNum(t.amountToken)} ${s.tokenSymbol}</td>`;
+        h += `<td>$${t.price.toFixed(6)}</td>`;
+        h += `<td style="color:var(--yellow)">${gasStr}</td>`;
+        h += `<td><a href="https://basescan.org/tx/${t.txHash}" target="_blank" style="color:var(--cyan)">${t.txHash.slice(0, 8)}</a></td>`;
+        h += `</tr>`;
+      });
+      h += `</table>`;
+    }
+
+    h += `</div>`;
+  });
+
+  $el.innerHTML = h;
 }
 
 function fmtNum(n) {
@@ -1057,18 +1185,21 @@ function stopPolling() {
 
 async function pollAll() {
   try {
-    const [agentRes, blockRes, stratRes, exitRes, tradingRes] = await Promise.all([
+    const [agentRes, blockRes, stratRes, exitRes, tradingRes, ethPriceRes] = await Promise.all([
       fetch('/api/agent'),
       fetch('/api/block'),
       fetch('/api/strategies'),
       fetch('/api/exit-strategies'),
       fetch('/api/trading-strategies'),
+      fetch('/api/token/0x4200000000000000000000000000000000000006/price'),
     ]);
     agentState = await agentRes.json();
     const block = await blockRes.json();
     try { strategiesCache = await stratRes.json(); } catch { strategiesCache = []; }
     try { exitStrategiesCache = await exitRes.json(); } catch { exitStrategiesCache = []; }
     try { tradingStrategiesCache = await tradingRes.json(); } catch { tradingStrategiesCache = []; }
+    try { const epd = await ethPriceRes.json(); if (epd.price) ethPriceUsd = epd.price; } catch {}
+    tradingStrategiesCache.forEach(s => { if (!collapsedStrategies.has(s.id) && !collapsedStrategies.has('_seen_' + s.id)) { collapsedStrategies.add(s.id); collapsedStrategies.add('_seen_' + s.id); } });
     const addrs = agentState.watching || [];
 
     const hasActiveTrades = Array.isArray(tradingStrategiesCache) && tradingStrategiesCache.some(s => s.status === 'running' || s.status === 'paused');
@@ -1126,6 +1257,7 @@ document.addEventListener('keydown', (e) => {
     case '1': e.preventDefault(); switchTab('trade'); break;
     case '2': e.preventDefault(); switchTab('flow'); break;
     case '3': e.preventDefault(); switchTab('portfolio'); break;
+    case '4': e.preventDefault(); switchTab('history'); renderHistory(); break;
   }
 });
 
@@ -1211,6 +1343,7 @@ async function runCmd(raw) {
             '  trade-remove <id>  remove finished strategy from monitor',
             '  trade-pause <id>   pause trading strategy',
             '  trade-resume <id>  resume trading strategy',
+            '  liquidate          cancel all strategies, sell all positions',
             '  suggest [token]    analyze token price, recommend strategy',
           ];
         } else {
@@ -1228,7 +1361,7 @@ async function runCmd(raw) {
         lines.push('  clear              clear output                Cmd+K');
         lines.push('  help               this message                Cmd+/');
         lines.push('');
-        lines.push('  Cmd+1 Trade   Cmd+2 Flow   Cmd+3 Portfolio');
+        lines.push('  Cmd+1 Trade   Cmd+2 Flow   Cmd+3 Portfolio   Cmd+4 History');
         lines.push('');
 
         lines.forEach(l => {
@@ -1874,6 +2007,21 @@ async function runCmd(raw) {
         break;
       }
 
+      case 'liquidate': {
+        const hasPositions = tradingStrategiesCache.some(s => s.status === 'running' || s.status === 'paused' || s.position.tokenBalance > 0);
+        if (!hasPositions) { print('nothing to liquidate', 'dim'); break; }
+        if (!confirm('Cancel all strategies and sell all positions to USDC?')) break;
+        print('liquidating all positions...', 'warn');
+        const res = await fetch('/api/trading/liquidate', { method: 'POST' });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        if (data.cancelled > 0) print(`cancelled ${data.cancelled} strategies`, 'dim');
+        if (data.sold.length > 0) data.sold.forEach(s => print(`sold: ${s}`, 'ok'));
+        if (data.errors.length > 0) data.errors.forEach(e => print(`error: ${e}`, 'err'));
+        if (data.sold.length === 0 && data.errors.length === 0) print('no token positions to sell', 'dim');
+        break;
+      }
+
       case 'suggest': {
         const sugInput = parts.slice(1).join(' ');
 
@@ -2334,6 +2482,12 @@ async function boot() {
         `<span>${shortAddr(w.address)}</span> ETH: <span>${parseFloat(w.ethBalance).toFixed(4)}</span> USDC: <span>${parseFloat(w.usdcBalance).toFixed(2)}</span>`;
     }
   } catch {}
+  // Fetch ETH price for gas fee display
+  try {
+    const ep = await fetch('/api/token/0x4200000000000000000000000000000000000006/price');
+    const epd = await ep.json();
+    if (epd.price) ethPriceUsd = epd.price;
+  } catch {}
 
   // Load launches + agent state in parallel
   try {
@@ -2350,6 +2504,7 @@ async function boot() {
     const tradingRes = await fetch('/api/trading-strategies');
     tradingStrategiesCache = await tradingRes.json();
   } catch { tradingStrategiesCache = []; }
+  tradingStrategiesCache.forEach(s => { if (!collapsedStrategies.has('_seen_' + s.id)) { collapsedStrategies.add(s.id); collapsedStrategies.add('_seen_' + s.id); } });
   const runningTrades = Array.isArray(tradingStrategiesCache) ? tradingStrategiesCache.filter(s => s.status === 'running' || s.status === 'paused') : [];
 
   const watching = agentState.watching || [];

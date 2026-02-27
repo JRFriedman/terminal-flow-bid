@@ -42,6 +42,8 @@ import {
   getTradingStrategy,
   cancelTradingStrategy,
   removeTradingStrategy,
+  sellStrategyPosition,
+  liquidateAll,
   pauseTradingStrategy,
   resumeTradingStrategy,
   setTradingStrategies,
@@ -921,6 +923,29 @@ app.delete("/api/trading-strategy/:id", (req, res) => {
     return;
   }
   res.json({ status: "removed" });
+});
+
+app.post("/api/trading-strategy/:id/sell", async (req, res) => {
+  const pct = Number(req.body?.pct ?? req.query.pct ?? 100);
+  try {
+    const result = await sellStrategyPosition(req.params.id, pct);
+    if ("error" in result) {
+      res.status(400).json(result);
+      return;
+    }
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/trading/liquidate", async (req, res) => {
+  try {
+    const result = await liquidateAll();
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post("/api/trading-strategy/:id/pause", (req, res) => {

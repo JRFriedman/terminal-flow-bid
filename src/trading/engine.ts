@@ -307,7 +307,7 @@ async function executeBuy(
   addLog(state, `BUY $${amountUsdc.toFixed(2)} USDC → ${state.tokenSymbol}`, "trade");
 
   try {
-    const { hash, amountOut } = await swapExactInputSingle(
+    const { hash, amountOut, gasCostEth } = await swapExactInputSingle(
       USDC_BASE,
       state.tokenAddress as Address,
       amountIn
@@ -324,6 +324,7 @@ async function executeBuy(
       (oldAvg * oldBalance + effectivePrice * tokenReceived) /
       state.position.tokenBalance;
     state.position.totalInvested += amountUsdc;
+    state.totalGasCostEth = (state.totalGasCostEth || 0) + gasCostEth;
 
     // Record trade
     const trade: Trade = {
@@ -333,12 +334,13 @@ async function executeBuy(
       amountToken: tokenReceived,
       price: effectivePrice,
       txHash: hash,
+      gasCostEth,
     };
     state.trades.push(trade);
 
     addLog(
       state,
-      `BUY OK: ${formatNum(tokenReceived)} ${state.tokenSymbol} @ $${effectivePrice.toFixed(6)} [${hash.slice(0, 10)}]`,
+      `BUY OK: ${formatNum(tokenReceived)} ${state.tokenSymbol} @ $${effectivePrice.toFixed(6)} [${hash.slice(0, 10)}] (gas: ${gasCostEth.toFixed(5)} ETH)`,
       "trade"
     );
     markDirty();
@@ -375,7 +377,7 @@ async function executeSell(
   );
 
   try {
-    const { hash, amountOut } = await swapExactInputSingle(
+    const { hash, amountOut, gasCostEth } = await swapExactInputSingle(
       state.tokenAddress as Address,
       USDC_BASE,
       amountIn
@@ -388,6 +390,7 @@ async function executeSell(
     state.position.tokenBalance -= tokenAmount;
     if (state.position.tokenBalance < 0) state.position.tokenBalance = 0;
     state.position.totalRealized += usdcReceived;
+    state.totalGasCostEth = (state.totalGasCostEth || 0) + gasCostEth;
 
     // Update realized PnL
     state.pnl.realized =
@@ -403,12 +406,13 @@ async function executeSell(
       amountToken: tokenAmount,
       price: effectivePrice,
       txHash: hash,
+      gasCostEth,
     };
     state.trades.push(trade);
 
     addLog(
       state,
-      `SELL OK: ${formatNum(tokenAmount)} ${state.tokenSymbol} \u2192 $${usdcReceived.toFixed(2)} @ $${effectivePrice.toFixed(6)} [${hash.slice(0, 10)}]`,
+      `SELL OK: ${formatNum(tokenAmount)} ${state.tokenSymbol} \u2192 $${usdcReceived.toFixed(2)} @ $${effectivePrice.toFixed(6)} [${hash.slice(0, 10)}] (gas: ${gasCostEth.toFixed(5)} ETH)`,
       "trade"
     );
     markDirty();
@@ -426,6 +430,109 @@ async function executeSell(
   } catch (err: any) {
     addLog(state, `SELL FAILED: ${err.message}`, "error");
   }
+}
+
+/** Sell a percentage (0-100) of a strategy's token position */
+export async function sellStrategyPosition(id: string, pct: number): Promise<{ sold: string } | { error: string }> {
+  const s = tradingStrategies.get(id);
+  if (!s) return { error: "Strategy not found" };
+  if (s.position.tokenBalance <= 0) return { error: "No position to sell" };
+  if (pct <= 0 || pct > 100) return { error: "Percentage must be 1-100" };
+
+  const tokenAmount = s.position.tokenBalance * (pct / 100);
+  const currentPrice = getPrice(s.tokenAddress) ?? s.position.avgEntryPrice;
+  const label = pct === 100 ? "manual sell (all)" : `manual sell (${pct}%)`;
+
+  await executeSell(s, tokenAmount, currentPrice, label);
+
+  // If sold 100%, cancel the strategy
+  if (pct === 100 && (s.status === "running" || s.status === "paused")) {
+    s.status = "done";
+    addLog(s, "Strategy stopped after full sell", "info");
+    stopStrategyLoop(id);
+  }
+  markDirty();
+
+  return { sold: `${formatNum(tokenAmount)} ${s.tokenSymbol} (${pct}%)` };
+}
+
+/** Cancel all strategies and sell all token positions back to USDC */
+export async function liquidateAll(): Promise<{ cancelled: number; sold: string[]; errors: string[] }> {
+  const results = { cancelled: 0, sold: [] as string[], errors: [] as string[] };
+
+  // 1. Cancel all running/paused strategies
+  for (const state of tradingStrategies.values()) {
+    if (state.status === "running" || state.status === "paused") {
+      state.status = "done";
+      addLog(state, "Strategy cancelled (liquidate all)", "info");
+      stopStrategyLoop(state.id);
+      results.cancelled++;
+    }
+  }
+  markDirty();
+
+  // 2. Sell all token positions
+  // Deduplicate by token address (multiple strategies may hold the same token)
+  const positions = new Map<string, { balance: number; symbol: string; decimals: number; states: TradingStrategyState[] }>();
+  for (const state of tradingStrategies.values()) {
+    if (state.position.tokenBalance > 0) {
+      const key = state.tokenAddress.toLowerCase();
+      const existing = positions.get(key);
+      if (existing) {
+        existing.balance += state.position.tokenBalance;
+        existing.states.push(state);
+      } else {
+        positions.set(key, {
+          balance: state.position.tokenBalance,
+          symbol: state.tokenSymbol,
+          decimals: state.tokenDecimals,
+          states: [state],
+        });
+      }
+    }
+  }
+
+  for (const [addr, pos] of positions) {
+    try {
+      const amountIn = BigInt(Math.floor(pos.balance * 10 ** pos.decimals));
+      const { hash, amountOut, gasCostEth } = await swapExactInputSingle(
+        addr as Address,
+        USDC_BASE,
+        amountIn
+      );
+      const usdcReceived = Number(amountOut) / 1e6;
+      const effectivePrice = usdcReceived / pos.balance;
+
+      for (const state of pos.states) {
+        const sold = state.position.tokenBalance;
+        const gasShare = gasCostEth * (sold / pos.balance);
+        state.position.tokenBalance = 0;
+        state.position.totalRealized += (sold / pos.balance) * usdcReceived;
+        state.pnl.realized = state.position.totalRealized - state.position.totalInvested;
+        state.totalGasCostEth = (state.totalGasCostEth || 0) + gasShare;
+        state.trades.push({
+          timestamp: Date.now(),
+          side: "sell",
+          amountUsdc: (sold / pos.balance) * usdcReceived,
+          amountToken: sold,
+          price: effectivePrice,
+          txHash: hash,
+          gasCostEth: gasShare,
+        });
+        addLog(state, `LIQUIDATED: ${formatNum(sold)} ${pos.symbol} → $${((sold / pos.balance) * usdcReceived).toFixed(2)} USDC [${hash.slice(0, 10)}]`, "trade");
+      }
+
+      results.sold.push(`${formatNum(pos.balance)} ${pos.symbol} → $${usdcReceived.toFixed(2)}`);
+      await sendTelegramMessage(
+        `🔴 LIQUIDATED: ${formatNum(pos.balance)} ${pos.symbol} → $${usdcReceived.toFixed(2)} USDC @ $${effectivePrice.toFixed(6)}\n[tx](${baseScanTxUrl(hash)})`
+      );
+    } catch (err: any) {
+      results.errors.push(`${pos.symbol}: ${err.message}`);
+    }
+  }
+
+  markDirty();
+  return results;
 }
 
 // ─── Helpers ───

@@ -33,6 +33,9 @@ function getSpandexConfig() {
 /**
  * Ensure token approval for a spender. Skips if allowance is already sufficient.
  */
+// Track gas spent on approvals within current swap call
+let _lastApprovalGasEth = 0;
+
 async function ensureApproval(
   token: Address,
   spender: Address,
@@ -49,7 +52,7 @@ async function ensureApproval(
     args: [account.address, spender],
   });
 
-  if (allowance >= amount) return;
+  if (allowance >= amount) { _lastApprovalGasEth = 0; return; }
 
   console.log(`  Approving ${spender.slice(0, 10)}... (max uint256)`);
   const hash = await walletClient.writeContract({
@@ -63,10 +66,25 @@ async function ensureApproval(
 
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   if (receipt.status === "reverted") throw new Error(`Approve reverted: ${hash}`);
-  console.log(`  Approved in block ${receipt.blockNumber}`);
+  _lastApprovalGasEth = Number(receipt.gasUsed * (receipt.effectiveGasPrice ?? 0n)) / 1e18;
+  console.log(`  Approved in block ${receipt.blockNumber} (gas: ${_lastApprovalGasEth.toFixed(6)} ETH)`);
 
-  // Wait for RPC state to sync after approval
-  await new Promise((r) => setTimeout(r, 2000));
+  // Poll until RPC reflects the new allowance (up to 15s)
+  for (let i = 0; i < 5; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    const updated = await publicClient.readContract({
+      address: token,
+      abi: erc20Abi,
+      functionName: "allowance",
+      args: [account.address, spender],
+    });
+    if (updated >= amount) {
+      console.log(`  Allowance confirmed after ${(i + 1) * 3}s`);
+      return;
+    }
+    console.log(`  Waiting for allowance to reflect... (${(i + 1) * 3}s)`);
+  }
+  console.log(`  Proceeding despite allowance not yet visible (may retry on gas est)`);
 }
 
 /**
@@ -80,7 +98,7 @@ export async function swapExactInputSingle(
   amountIn: bigint,
   _fee: number = 3000,
   slippageBps: number = 100
-): Promise<{ hash: Hash; amountOut: bigint }> {
+): Promise<{ hash: Hash; amountOut: bigint; gasCostEth: number }> {
   const config = getSpandexConfig();
   const publicClient = getPublicClient();
   const walletClient = getWalletClient();
@@ -134,32 +152,31 @@ export async function swapExactInputSingle(
   }
 
   // Estimate gas explicitly to avoid viem over-estimation
-  // Retry once on failure (handles post-approval RPC sync delay)
+  // Retry up to 3 times on failure (handles post-approval RPC sync delay)
   const nonce = await publicClient.getTransactionCount({ address: account.address });
-  let gasEstimate: bigint;
-  try {
-    gasEstimate = await publicClient.estimateGas({
-      account: account.address,
-      to: bestQuote.txData.to as Address,
-      data: bestQuote.txData.data as `0x${string}`,
-      value: bestQuote.txData.value ? BigInt(bestQuote.txData.value) : 0n,
-    });
-  } catch (e: any) {
-    console.log(`  Gas estimation failed, retrying in 3s... (${e.message?.slice(0, 60)})`);
-    await new Promise((r) => setTimeout(r, 3000));
-    gasEstimate = await publicClient.estimateGas({
-      account: account.address,
-      to: bestQuote.txData.to as Address,
-      data: bestQuote.txData.data as `0x${string}`,
-      value: bestQuote.txData.value ? BigInt(bestQuote.txData.value) : 0n,
-    });
+  let gasEstimate: bigint | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      gasEstimate = await publicClient.estimateGas({
+        account: account.address,
+        to: bestQuote.txData.to as Address,
+        data: bestQuote.txData.data as `0x${string}`,
+        value: bestQuote.txData.value ? BigInt(bestQuote.txData.value) : 0n,
+      });
+      break;
+    } catch (e: any) {
+      if (attempt === 2) throw e;
+      const wait = (attempt + 1) * 3;
+      console.log(`  Gas estimation failed (attempt ${attempt + 1}/3), retrying in ${wait}s... (${e.message?.slice(0, 60)})`);
+      await new Promise((r) => setTimeout(r, wait * 1000));
+    }
   }
 
   const hash = await walletClient.sendTransaction({
     to: bestQuote.txData.to as Address,
     data: bestQuote.txData.data as `0x${string}`,
     value: bestQuote.txData.value ? BigInt(bestQuote.txData.value) : 0n,
-    gas: gasEstimate + gasEstimate / 5n, // 20% buffer
+    gas: gasEstimate! + gasEstimate! / 5n, // 20% buffer
     nonce,
     account,
     chain: walletClient.chain,
@@ -170,9 +187,31 @@ export async function swapExactInputSingle(
 
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   if (receipt.status === "reverted") throw new Error(`Swap reverted: ${hash}`);
-  console.log(`  Swap confirmed in block ${receipt.blockNumber}`);
 
-  return { hash, amountOut: outputAmount };
+  // Calculate gas cost (swap + any approval)
+  const swapGasEth = Number(receipt.gasUsed * (receipt.effectiveGasPrice ?? 0n)) / 1e18;
+  const totalGasEth = swapGasEth + _lastApprovalGasEth;
+  _lastApprovalGasEth = 0;
+  console.log(`  Swap confirmed in block ${receipt.blockNumber} (gas: ${totalGasEth.toFixed(6)} ETH)`);
+
+  // Parse actual received amount from Transfer events
+  const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+  const myAddr = account.address.toLowerCase();
+  let actualOut = outputAmount; // fallback to quoted amount
+  for (const log of receipt.logs) {
+    if (log.topics[0] === TRANSFER_TOPIC && log.address.toLowerCase() === tokenOut.toLowerCase()) {
+      const to = log.topics[2] ? ("0x" + log.topics[2].slice(26)).toLowerCase() : "";
+      if (to === myAddr) {
+        actualOut = BigInt(log.data);
+        break;
+      }
+    }
+  }
+  if (actualOut !== outputAmount) {
+    console.log(`  Actual received: ${actualOut} (quoted: ${outputAmount})`);
+  }
+
+  return { hash, amountOut: actualOut, gasCostEth: totalGasEth };
 }
 
 /**

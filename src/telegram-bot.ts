@@ -114,7 +114,7 @@ export function startTelegramBot(): void {
   }
 
   // Commands that take arguments
-  for (const cmd of ["watch", "unwatch", "info", "arm", "disarm", "bid", "strategy", "cancel", "exit", "exit-cancel", "launch", "claim", "claim-all", "trade", "trade-cancel", "trade-remove", "trade-pause", "trade-resume"]) {
+  for (const cmd of ["watch", "unwatch", "info", "arm", "disarm", "bid", "strategy", "cancel", "exit", "exit-cancel", "launch", "claim", "claim-all", "trade", "trade-cancel", "trade-remove", "trade-pause", "trade-resume", "liquidate"]) {
     bot.command(cmd.replace("-", "_"), async (ctx) => {
       try {
         const args = ctx.match ? `${cmd} ${ctx.match}` : cmd;
@@ -712,6 +712,17 @@ async function handleCommand(raw: string): Promise<string> {
       const data = await api(`/api/trading-strategy/${id}/resume`, "POST");
       if (data.error) throw new Error(data.error);
       return `Resumed trading strategy \`${id}\``;
+    }
+
+    case "liquidate": {
+      const data = await api("/api/trading/liquidate", "POST");
+      if (data.error) throw new Error(data.error);
+      let msg = `🔴 *LIQUIDATED*\n`;
+      if (data.cancelled > 0) msg += `Cancelled ${data.cancelled} strategies\n`;
+      if (data.sold?.length > 0) msg += data.sold.map((s: string) => `Sold: ${s}`).join("\n") + "\n";
+      if (data.errors?.length > 0) msg += data.errors.map((e: string) => `Error: ${e}`).join("\n") + "\n";
+      if (!data.sold?.length && !data.errors?.length) msg += "No token positions to sell";
+      return msg;
     }
 
     default:

@@ -87,6 +87,7 @@ export function startMeanReversion(
     priceHistory: [],
     trades: [],
     pnl: { realized: 0, unrealized: 0 },
+    totalGasCostEth: 0,
     riskLimits,
     params: params as unknown as Record<string, any>,
     log: [],

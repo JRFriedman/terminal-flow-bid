@@ -95,6 +95,7 @@ export function startTwap(opts: StartTwapOptions): TradingStrategyState {
     priceHistory: [],
     trades: [],
     pnl: { realized: 0, unrealized: 0 },
+    totalGasCostEth: 0,
     riskLimits,
     params: params as unknown as Record<string, any>,
     log: [],
