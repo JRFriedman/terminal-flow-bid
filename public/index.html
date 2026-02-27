@@ -828,22 +828,26 @@ function renderHistory() {
   let h = '';
 
   // Summary across all strategies
-  let totalInvested = 0, totalRealized = 0, totalGasEth = 0, totalTrades = 0;
+  let totalInvested = 0, totalRealized = 0, totalPosValue = 0, totalGasEth = 0, totalTrades = 0;
   tradingStrategiesCache.forEach(s => {
     totalInvested += s.position.totalInvested;
     totalRealized += s.position.totalRealized;
     totalGasEth += s.totalGasCostEth || 0;
     totalTrades += s.trades.length;
+    const lastPrice = s.priceHistory.length > 0 ? s.priceHistory[s.priceHistory.length - 1].price : 0;
+    totalPosValue += s.position.tokenBalance * lastPrice;
   });
   const totalGasUsd = totalGasEth * ethPriceUsd;
-  const rawPnl = totalRealized - totalInvested;
+  const rawPnl = (totalRealized + totalPosValue) - totalInvested;
   const truePnl = rawPnl - totalGasUsd;
   const truePnlColor = truePnl >= 0 ? 'var(--green)' : 'var(--red)';
 
   h += `<div style="margin-bottom:12px;line-height:1.8">`;
   h += `<div><span class="label" style="color:var(--muted)">SUMMARY</span></div>`;
   h += `<div><span class="label">total invested</span> ${fmtUsd(totalInvested)}</div>`;
-  h += `<div><span class="label">total realized</span> ${fmtUsd(totalRealized)}</div>`;
+  h += `<div><span class="label">realized</span> ${fmtUsd(totalRealized)}`;
+  if (totalPosValue > 0) h += `  <span class="label">open positions</span> ${fmtUsd(totalPosValue)}`;
+  h += `</div>`;
   h += `<div><span class="label">raw pnl</span> <span style="color:${rawPnl >= 0 ? 'var(--green)' : 'var(--red)'}">${rawPnl >= 0 ? '+' : ''}${fmtUsd(rawPnl)}</span></div>`;
   h += `<div><span class="label">gas fees</span> <span style="color:var(--yellow)">${totalGasEth.toFixed(5)} ETH (~${fmtUsd(totalGasUsd)})</span></div>`;
   h += `<div><span class="label">true pnl</span> <span style="color:${truePnlColor};font-weight:bold">${truePnl >= 0 ? '+' : ''}${fmtUsd(truePnl)}</span></div>`;
