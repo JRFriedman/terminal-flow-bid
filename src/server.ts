@@ -326,7 +326,7 @@ app.post("/api/bid/schedule", async (req, res) => {
 // ─── Launch ───
 app.post("/api/launch", async (req, res) => {
   try {
-    const { name, symbol, metadata } = req.body;
+    const { name, symbol, metadata, logo } = req.body;
     if (!name || !symbol) {
       res.status(400).json({ error: "Missing name or symbol" });
       return;
@@ -335,12 +335,19 @@ app.post("/api/launch", async (req, res) => {
     const publicClient = getPublicClient();
     const walletClient = (await import("./config.js")).getWalletClient();
 
+    // Build metadata with logo
+    const DEFAULT_LOGO = "https://i.imgur.com/cLrVcc2.png";
+    const launchMetadata = metadata || {};
+    if (!launchMetadata.logo) {
+      launchMetadata.logo = logo || DEFAULT_LOGO;
+    }
+
     // Build the launch transaction
     const result = await buildLaunchTx({
       deployer: account.address,
       name,
       symbol,
-      metadata: metadata || undefined,
+      metadata: launchMetadata,
     });
 
     console.log(`[launch] Deploying ${name} (${symbol})`);
