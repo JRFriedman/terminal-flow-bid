@@ -14,6 +14,13 @@ async function api(path: string, method = "GET", body?: unknown): Promise<any> {
   return res.json();
 }
 
+function fmtNum(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+  if (n >= 1) return n.toFixed(2);
+  return n.toFixed(6);
+}
+
 function fmtUsd(n: number): string {
   if (n >= 1_000_000) return "$" + (n / 1_000_000).toFixed(2) + "M";
   if (n >= 1_000) return "$" + (n / 1_000).toFixed(1) + "K";
@@ -83,6 +90,7 @@ export function startTelegramBot(): void {
     { command: "status", description: "Show agent state" },
     { command: "strategies", description: "Show active strategies" },
     { command: "exits", description: "Show exit strategies" },
+    { command: "trades", description: "Show trading strategies" },
     { command: "help", description: "Show all commands" },
   ]).catch((err) => console.error("[telegram] setMyCommands failed:", err.message));
 
@@ -93,7 +101,7 @@ export function startTelegramBot(): void {
   );
 
   // Handle slash commands — strip the / and route to handleCommand
-  for (const cmd of ["auctions", "wallet", "status", "strategies", "exits", "help"]) {
+  for (const cmd of ["auctions", "wallet", "status", "strategies", "exits", "trades", "help"]) {
     bot.command(cmd, async (ctx) => {
       try {
         const args = ctx.match ? `${cmd} ${ctx.match}` : cmd;
@@ -106,7 +114,7 @@ export function startTelegramBot(): void {
   }
 
   // Commands that take arguments
-  for (const cmd of ["watch", "unwatch", "info", "arm", "disarm", "bid", "strategy", "cancel", "exit", "exit-cancel", "launch", "claim", "claim-all"]) {
+  for (const cmd of ["watch", "unwatch", "info", "arm", "disarm", "bid", "strategy", "cancel", "exit", "exit-cancel", "launch", "claim", "claim-all", "trade", "trade-cancel", "trade-remove", "trade-pause", "trade-resume"]) {
     bot.command(cmd.replace("-", "_"), async (ctx) => {
       try {
         const args = ctx.match ? `${cmd} ${ctx.match}` : cmd;
@@ -183,6 +191,17 @@ async function handleCommand(raw: string): Promise<string> {
         "`launch <name> <symbol>` — launch token",
         "`claim <id>` — claim/exit a bid",
         "`claim-all` — claim all claimable bids",
+        "",
+        "*Trading*",
+        "`trade dca <token> <amt> <interval> [budget] [sl%]`",
+        "`trade twap <token> <total> <duration> <chunks> [sl%]`",
+        "`trade mean-revert <token> <amt> <ema> <buyDip> <sellRip> [sl%]`",
+        "`trades` — list active trading strategies",
+        "`trade-cancel <id>` — cancel",
+        "`trade-remove <id>` — remove finished strategy",
+        "`trade-pause <id>` — pause",
+        "`trade-resume <id>` — resume",
+        "",
         "`status` — agent state",
         "`wallet` — wallet balances",
         "`info <id>` — auction details",
@@ -363,7 +382,7 @@ async function handleCommand(raw: string): Promise<string> {
       const data = await api("/api/strategy", "POST", body);
       if (data.error) throw new Error(data.error);
       const match = launchesCache.find((l: any) => l.auction === addr);
-      let msg = `\u2705 Strategy started on *${match ? match.tokenSymbol : shortAddr(addr)}*\nFDV: ${fmtUsd(Number(minFdv))} → ${fmtUsd(Number(maxFdv))}\nAmount: ${amt} USDC`;
+      let msg = `\u2705 Strategy started on *${match ? match.tokenSymbol : shortAddr(addr)}*\nFDV range: ${fmtUsd(Number(minFdv))} → ${fmtUsd(Number(maxFdv))}\nAmount: ${amt} USDC\nMode: watch-then-bid (single bid in final ~30s)`;
       if (exitProf) msg += `\nExit: ${exitProf}`;
       if (stopLoss != null) msg += `\nStop-loss: ${stopLoss}x`;
       return msg;
@@ -380,11 +399,13 @@ async function handleCommand(raw: string): Promise<string> {
         );
         const name = match ? match.tokenSymbol : shortAddr(s.auctionAddress);
         const icon =
-          s.status === "running"
+          s.status === "bidding"
             ? "\uD83D\uDFE2"
-            : s.status === "waiting"
-              ? "\u23F3"
-              : "\u2B1C";
+            : s.status === "watching"
+              ? "\uD83D\uDFE1"
+              : s.status === "waiting"
+                ? "\u23F3"
+                : "\u2B1C";
         lines.push(
           `${icon} *${name}* ${s.status} — FDV: ${fmtUsd(s.currentFdv)} — ${s.bidsPlaced} bids`
         );
@@ -527,6 +548,170 @@ async function handleCommand(raw: string): Promise<string> {
       const data = await api(`/api/exit-strategy/${addr}/cancel`, "POST");
       if (data.error) throw new Error(data.error);
       return `Cancelled exit strategy on ${shortAddr(addr)}`;
+    }
+
+    case "trade": {
+      const subCmd = parts[1]?.toLowerCase();
+      if (!subCmd) return "Usage: `trade dca|twap|mean-revert <token> ...`\nSend `help` for details.";
+
+      // Resolve token: accept 0x address or flow.bid symbol/index
+      const tokenInput = parts[2];
+      if (!tokenInput) return "Usage: `trade ${subCmd} <token> ...`";
+
+      let tokenAddress = tokenInput;
+      if (!tokenInput.startsWith("0x")) {
+        // Try to resolve from launches
+        const addr = await resolveAuction(tokenInput);
+        if (!addr) return `Could not resolve token: ${tokenInput}`;
+        // Get token address from launch
+        if (launchesCache.length === 0) launchesCache = await api("/api/launches");
+        const launch = launchesCache.find((l: any) => l.auction === addr);
+        if (!launch) return `Could not find token for auction: ${tokenInput}`;
+        tokenAddress = launch.token;
+      }
+
+      switch (subCmd) {
+        case "dca": {
+          // trade dca <token> <amountPerBuy> <interval> [totalBudget] [stopLoss%]
+          const amtStr = parts[3], intervalStr = parts[4];
+          if (!amtStr || !intervalStr)
+            return "Usage: `trade dca <token> <amountPerBuy> <interval> [budget] [stopLoss%]`\ninterval: 30m, 1h, 4h, 12h, 1d";
+          const budgetStr = parts[5];
+          const slStr = parts[6];
+
+          // Parse interval string to ms
+          const intervalMatch = intervalStr.match(/^(\d+)(m|h|d)$/i);
+          if (!intervalMatch) return `Invalid interval: ${intervalStr} (use 1h, 4h, 12h, 1d, 30m)`;
+          const ival = parseInt(intervalMatch[1]);
+          const iunit = intervalMatch[2].toLowerCase();
+          const intervalMs = iunit === "m" ? ival * 60000 : iunit === "h" ? ival * 3600000 : ival * 86400000;
+
+          const body: any = {
+            type: "dca",
+            tokenAddress,
+            params: {
+              amountPerBuy: Number(amtStr),
+              intervalMs,
+            },
+            riskLimits: {},
+          };
+          if (budgetStr) body.params.totalBudget = Number(budgetStr);
+          if (slStr) body.riskLimits.stopLossPercent = Number(slStr);
+
+          const data = await api("/api/trading-strategy", "POST", body);
+          if (data.error) throw new Error(data.error);
+          return `\u2705 DCA started on *${data.tokenSymbol}*\nID: \`${data.id}\`\n$${amtStr} every ${intervalStr}${budgetStr ? ` | budget: $${budgetStr}` : ""}${slStr ? ` | stop-loss: ${slStr}%` : ""}`;
+        }
+
+        case "twap": {
+          // trade twap <token> <totalAmount> <duration> <chunks> [stopLoss%]
+          const totalStr = parts[3], durStr = parts[4], chunksStr = parts[5];
+          if (!totalStr || !durStr || !chunksStr)
+            return "Usage: `trade twap <token> <total> <duration> <chunks> [stopLoss%]`\nduration: 30m, 1h, 4h, 1d";
+          const slStr = parts[6];
+
+          const durMatch = durStr.match(/^(\d+)(m|h|d)$/i);
+          if (!durMatch) return `Invalid duration: ${durStr}`;
+          const dval = parseInt(durMatch[1]);
+          const dunit = durMatch[2].toLowerCase();
+          const durationMs = dunit === "m" ? dval * 60000 : dunit === "h" ? dval * 3600000 : dval * 86400000;
+
+          const body: any = {
+            type: "twap",
+            tokenAddress,
+            params: {
+              totalAmount: Number(totalStr),
+              durationMs,
+              chunks: Number(chunksStr),
+            },
+            riskLimits: {},
+          };
+          if (slStr) body.riskLimits.stopLossPercent = Number(slStr);
+
+          const data = await api("/api/trading-strategy", "POST", body);
+          if (data.error) throw new Error(data.error);
+          const chunkSize = (Number(totalStr) / Number(chunksStr)).toFixed(2);
+          return `\u2705 TWAP started on *${data.tokenSymbol}*\nID: \`${data.id}\`\n$${totalStr} over ${durStr} in ${chunksStr} chunks ($${chunkSize} each)${slStr ? ` | stop-loss: ${slStr}%` : ""}`;
+        }
+
+        case "mean-revert": {
+          // trade mean-revert <token> <amount> <emaPeriod> <buyDip> <sellRip> [stopLoss%]
+          const amtStr = parts[3], emaStr = parts[4], buyStr = parts[5], sellStr = parts[6];
+          if (!amtStr || !emaStr || !buyStr || !sellStr)
+            return "Usage: `trade mean-revert <token> <amt> <emaPeriod> <buyDip%> <sellRip%> [stopLoss%]`\nemaPeriod: minutes (e.g. 60 for 1h)";
+          const slStr = parts[7];
+
+          const body: any = {
+            type: "mean-reversion",
+            tokenAddress,
+            params: {
+              amountPerTrade: Number(amtStr),
+              emaPeriodMinutes: Number(emaStr),
+              buyThresholdPct: Number(buyStr),
+              sellThresholdPct: Number(sellStr),
+            },
+            riskLimits: {},
+          };
+          if (slStr) body.riskLimits.stopLossPercent = Number(slStr);
+
+          const data = await api("/api/trading-strategy", "POST", body);
+          if (data.error) throw new Error(data.error);
+          return `\u2705 Mean-Reversion started on *${data.tokenSymbol}*\nID: \`${data.id}\`\n$${amtStr}/trade, ${emaStr}min EMA, buy at -${buyStr}%, sell at +${sellStr}%${slStr ? ` | stop-loss: ${slStr}%` : ""}`;
+        }
+
+        default:
+          return `Unknown trade sub-command: ${subCmd}\nUse: \`trade dca|twap|mean-revert\``;
+      }
+    }
+
+    case "trades": {
+      const strats = await api("/api/trading-strategies");
+      if (!Array.isArray(strats) || strats.length === 0)
+        return "No active trading strategies";
+      const lines = ["*Trading Strategies*", ""];
+      strats.forEach((s: any) => {
+        const icon = s.status === "running" ? "\uD83D\uDFE2" : s.status === "paused" ? "\u23F8\uFE0F" : s.status === "done" ? "\u2705" : "\u274C";
+        const posValue = s.position.tokenBalance * (s.priceHistory.length > 0 ? s.priceHistory[s.priceHistory.length - 1].price : 0);
+        const pnlTotal = s.pnl.realized + s.pnl.unrealized;
+        const pnlStr = pnlTotal >= 0 ? `+${fmtUsd(pnlTotal)}` : `-${fmtUsd(Math.abs(pnlTotal))}`;
+        lines.push(`${icon} \`${s.id}\``);
+        lines.push(`  ${s.type} ${s.tokenSymbol} — ${s.status}`);
+        lines.push(`  Position: ${fmtNum(s.position.tokenBalance)} ($${posValue.toFixed(2)}) | PnL: ${pnlStr}`);
+        lines.push(`  Trades: ${s.trades.length} | Invested: ${fmtUsd(s.position.totalInvested)}`);
+      });
+      return lines.join("\n");
+    }
+
+    case "trade-cancel": {
+      const id = parts[1];
+      if (!id) return "Usage: `trade-cancel <id>`";
+      const data = await api(`/api/trading-strategy/${id}/cancel`, "POST");
+      if (data.error) throw new Error(data.error);
+      return `Cancelled trading strategy \`${id}\``;
+    }
+
+    case "trade-pause": {
+      const id = parts[1];
+      if (!id) return "Usage: `trade-pause <id>`";
+      const data = await api(`/api/trading-strategy/${id}/pause`, "POST");
+      if (data.error) throw new Error(data.error);
+      return `Paused trading strategy \`${id}\``;
+    }
+
+    case "trade-remove": {
+      const id = parts[1];
+      if (!id) return "Usage: `trade-remove <id>`";
+      const data = await api(`/api/trading-strategy/${id}`, "DELETE");
+      if (data.error) throw new Error(data.error);
+      return `Removed trading strategy \`${id}\``;
+    }
+
+    case "trade-resume": {
+      const id = parts[1];
+      if (!id) return "Usage: `trade-resume <id>`";
+      const data = await api(`/api/trading-strategy/${id}/resume`, "POST");
+      if (data.error) throw new Error(data.error);
+      return `Resumed trading strategy \`${id}\``;
     }
 
     default:

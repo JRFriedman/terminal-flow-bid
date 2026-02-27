@@ -1,4 +1,4 @@
-import { type Hash, type Address, erc20Abi } from "viem";
+import { type Hash, type Address, erc20Abi, maxUint256 } from "viem";
 import {
   createConfig,
   getQuote,
@@ -51,12 +51,12 @@ async function ensureApproval(
 
   if (allowance >= amount) return;
 
-  console.log(`  Approving ${spender.slice(0, 10)}...`);
+  console.log(`  Approving ${spender.slice(0, 10)}... (max uint256)`);
   const hash = await walletClient.writeContract({
     address: token,
     abi: erc20Abi,
     functionName: "approve",
-    args: [spender, amount],
+    args: [spender, maxUint256],
     account,
     chain: walletClient.chain,
   });
@@ -64,6 +64,9 @@ async function ensureApproval(
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   if (receipt.status === "reverted") throw new Error(`Approve reverted: ${hash}`);
   console.log(`  Approved in block ${receipt.blockNumber}`);
+
+  // Wait for RPC state to sync after approval
+  await new Promise((r) => setTimeout(r, 2000));
 }
 
 /**
@@ -131,13 +134,26 @@ export async function swapExactInputSingle(
   }
 
   // Estimate gas explicitly to avoid viem over-estimation
+  // Retry once on failure (handles post-approval RPC sync delay)
   const nonce = await publicClient.getTransactionCount({ address: account.address });
-  const gasEstimate = await publicClient.estimateGas({
-    account: account.address,
-    to: bestQuote.txData.to as Address,
-    data: bestQuote.txData.data as `0x${string}`,
-    value: bestQuote.txData.value ? BigInt(bestQuote.txData.value) : 0n,
-  });
+  let gasEstimate: bigint;
+  try {
+    gasEstimate = await publicClient.estimateGas({
+      account: account.address,
+      to: bestQuote.txData.to as Address,
+      data: bestQuote.txData.data as `0x${string}`,
+      value: bestQuote.txData.value ? BigInt(bestQuote.txData.value) : 0n,
+    });
+  } catch (e: any) {
+    console.log(`  Gas estimation failed, retrying in 3s... (${e.message?.slice(0, 60)})`);
+    await new Promise((r) => setTimeout(r, 3000));
+    gasEstimate = await publicClient.estimateGas({
+      account: account.address,
+      to: bestQuote.txData.to as Address,
+      data: bestQuote.txData.data as `0x${string}`,
+      value: bestQuote.txData.value ? BigInt(bestQuote.txData.value) : 0n,
+    });
+  }
 
   const hash = await walletClient.sendTransaction({
     to: bestQuote.txData.to as Address,

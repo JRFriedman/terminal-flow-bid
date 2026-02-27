@@ -209,7 +209,7 @@ async function runChecklist(
   const strategy = getStrategies().find(
     (s) =>
       s.auctionAddress === auctionAddr &&
-      (s.status === "waiting" || s.status === "running")
+      (s.status === "waiting" || s.status === "watching" || s.status === "bidding")
   );
 
   if (strategy) {

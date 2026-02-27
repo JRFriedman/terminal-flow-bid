@@ -37,6 +37,21 @@ import { startTelegramBot } from "./telegram-bot.js";
 import { loadState, markDirty, registerCollector } from "./persistence.js";
 import { setExitStrategies, resumeExitStrategies } from "./exit-strategy.js";
 import { setStrategies } from "./strategy.js";
+import {
+  getTradingStrategies,
+  getTradingStrategy,
+  cancelTradingStrategy,
+  removeTradingStrategy,
+  pauseTradingStrategy,
+  resumeTradingStrategy,
+  setTradingStrategies,
+  resumeTradingStrategies,
+} from "./trading/engine.js";
+import type { StrategyType } from "./trading/types.js";
+import { startDca, dcaEvaluate, parseInterval } from "./trading/strategies/dca.js";
+import { startTwap, twapEvaluate, parseDuration } from "./trading/strategies/twap.js";
+import { startMeanReversion, meanReversionEvaluate } from "./trading/strategies/mean-reversion.js";
+import type { EvaluateFn } from "./trading/engine.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -701,6 +716,66 @@ app.post("/api/claim-all", async (req, res) => {
 });
 
 // ─── Token price ───
+// Resolve a token symbol/name to an address — searches trading strategies + graduated launches
+app.get("/api/token/resolve/:query", async (req, res) => {
+  const query = req.params.query.toLowerCase();
+  // 1. Search active trading strategies
+  const strategies = getTradingStrategies();
+  const stratMatch = strategies.find(
+    (s) => s.tokenSymbol?.toLowerCase() === query
+  );
+  if (stratMatch) {
+    res.json({ token: stratMatch.tokenAddress, symbol: stratMatch.tokenSymbol });
+    return;
+  }
+  // 2. Search graduated launches
+  try {
+    const launches = await getLaunches();
+    const launchMatch = launches.find(
+      (l: any) =>
+        l.tokenSymbol?.toLowerCase() === query ||
+        l.tokenName?.toLowerCase().includes(query)
+    );
+    if (launchMatch) {
+      res.json({ token: launchMatch.token, symbol: launchMatch.tokenSymbol });
+      return;
+    }
+  } catch {}
+  // 3. If input looks like an address, validate it as ERC-20
+  if (query.startsWith("0x") && query.length >= 40) {
+    try {
+      const publicClient = getPublicClient();
+      const symbol = await publicClient.readContract({
+        address: query as `0x${string}`,
+        abi: erc20Abi,
+        functionName: "symbol",
+      });
+      res.json({ token: query, symbol });
+      return;
+    } catch {}
+  }
+  // 4. Search DexScreener for Base tokens by symbol/name
+  try {
+    const dsRes = await fetch(`https://api.dexscreener.com/latest/dex/search?q=${encodeURIComponent(query)}`);
+    if (dsRes.ok) {
+      const dsData = await dsRes.json() as any;
+      const pairs = dsData.pairs || [];
+      // Find first Base chain match by symbol or name
+      const match = pairs.find((p: any) =>
+        p.chainId === "base" && (
+          p.baseToken?.symbol?.toLowerCase() === query ||
+          p.baseToken?.name?.toLowerCase().includes(query)
+        )
+      );
+      if (match?.baseToken) {
+        res.json({ token: match.baseToken.address, symbol: match.baseToken.symbol });
+        return;
+      }
+    }
+  } catch {}
+  res.status(404).json({ error: "Token not found" });
+});
+
 app.get("/api/token/:addr/price", async (req, res) => {
   try {
     const price = await getTokenPrice(req.params.addr as `0x${string}`);
@@ -719,6 +794,151 @@ app.post("/api/readiness/dismiss", (req, res) => {
   }
   dismissAlert(auctionAddress, stage);
   res.json({ status: "dismissed" });
+});
+
+// ─── Trading Strategies ───
+app.get("/api/trading-strategies", (_req, res) => {
+  res.json(getTradingStrategies());
+});
+
+app.get("/api/trading-strategy/:id", (req, res) => {
+  const s = getTradingStrategy(req.params.id);
+  if (!s) {
+    res.status(404).json({ error: "Trading strategy not found" });
+    return;
+  }
+  res.json(s);
+});
+
+app.post("/api/trading-strategy", async (req, res) => {
+  try {
+    const { type, tokenAddress, params, riskLimits } = req.body;
+    if (!type || !tokenAddress) {
+      res.status(400).json({ error: "Missing type or tokenAddress" });
+      return;
+    }
+
+    // Resolve token metadata
+    const publicClient = getPublicClient();
+    let tokenSymbol: string;
+    let tokenDecimals: number;
+    try {
+      const [symbol, decimals] = await Promise.all([
+        publicClient.readContract({
+          address: tokenAddress as `0x${string}`,
+          abi: erc20Abi,
+          functionName: "symbol",
+        }),
+        publicClient.readContract({
+          address: tokenAddress as `0x${string}`,
+          abi: erc20Abi,
+          functionName: "decimals",
+        }),
+      ]);
+      tokenSymbol = symbol as string;
+      tokenDecimals = Number(decimals);
+    } catch {
+      res.status(400).json({ error: "Could not read token metadata. Is this a valid ERC-20 address?" });
+      return;
+    }
+
+    let state;
+    switch (type) {
+      case "dca":
+        if (!params?.amountPerBuy || !params?.intervalMs) {
+          res.status(400).json({ error: "DCA requires params.amountPerBuy and params.intervalMs" });
+          return;
+        }
+        state = startDca({
+          tokenAddress,
+          tokenSymbol,
+          tokenDecimals,
+          amountPerBuy: Number(params.amountPerBuy),
+          intervalMs: Number(params.intervalMs),
+          totalBudget: params.totalBudget ? Number(params.totalBudget) : undefined,
+          riskLimits,
+        });
+        break;
+
+      case "twap":
+        if (!params?.totalAmount || !params?.durationMs || !params?.chunks) {
+          res.status(400).json({ error: "TWAP requires params.totalAmount, params.durationMs, and params.chunks" });
+          return;
+        }
+        state = startTwap({
+          tokenAddress,
+          tokenSymbol,
+          tokenDecimals,
+          totalAmount: Number(params.totalAmount),
+          durationMs: Number(params.durationMs),
+          chunks: Number(params.chunks),
+          riskLimits,
+        });
+        break;
+
+      case "mean-reversion":
+        if (!params?.amountPerTrade || !params?.emaPeriodMinutes || !params?.buyThresholdPct || !params?.sellThresholdPct) {
+          res.status(400).json({ error: "Mean-reversion requires params.amountPerTrade, emaPeriodMinutes, buyThresholdPct, sellThresholdPct" });
+          return;
+        }
+        state = startMeanReversion({
+          tokenAddress,
+          tokenSymbol,
+          tokenDecimals,
+          amountPerTrade: Number(params.amountPerTrade),
+          emaPeriodMinutes: Number(params.emaPeriodMinutes),
+          buyThresholdPct: Number(params.buyThresholdPct),
+          sellThresholdPct: Number(params.sellThresholdPct),
+          cooldownMs: params.cooldownMs ? Number(params.cooldownMs) : undefined,
+          riskLimits,
+        });
+        break;
+
+      default:
+        res.status(400).json({ error: `Unknown strategy type: ${type}` });
+        return;
+    }
+
+    res.json({ status: "started", id: state.id, type: state.type, tokenSymbol });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/trading-strategy/:id/cancel", (req, res) => {
+  const ok = cancelTradingStrategy(req.params.id);
+  if (!ok) {
+    res.status(404).json({ error: "No active trading strategy with this ID" });
+    return;
+  }
+  res.json({ status: "cancelled" });
+});
+
+app.delete("/api/trading-strategy/:id", (req, res) => {
+  const ok = removeTradingStrategy(req.params.id);
+  if (!ok) {
+    res.status(404).json({ error: "No trading strategy with this ID" });
+    return;
+  }
+  res.json({ status: "removed" });
+});
+
+app.post("/api/trading-strategy/:id/pause", (req, res) => {
+  const ok = pauseTradingStrategy(req.params.id);
+  if (!ok) {
+    res.status(404).json({ error: "No running trading strategy with this ID" });
+    return;
+  }
+  res.json({ status: "paused" });
+});
+
+app.post("/api/trading-strategy/:id/resume", (req, res) => {
+  const ok = resumeTradingStrategy(req.params.id);
+  if (!ok) {
+    res.status(404).json({ error: "No paused trading strategy with this ID" });
+    return;
+  }
+  res.json({ status: "resumed" });
 });
 
 // ─── Boot: restore state and start ───
@@ -768,6 +988,15 @@ if (savedState["Readiness Alerts"]) {
   }
 }
 
+if (savedState["Trading Strategies"]) {
+  const ts = savedState["Trading Strategies"] as any[];
+  if (Array.isArray(ts)) {
+    setTradingStrategies(ts);
+    const running = ts.filter((s) => s.status === "running").length;
+    console.log(`[boot] Restored ${ts.length} trading strategies (${running} running)`);
+  }
+}
+
 const HOST = AUTH_TOKEN ? "0.0.0.0" : "127.0.0.1";
 app.listen(PORT, HOST, () => {
   console.log(`terminal.flow.bid running on http://localhost:${PORT}`);
@@ -776,4 +1005,11 @@ app.listen(PORT, HOST, () => {
   startTelegramBot();
   // Resume running exit strategies after load
   resumeExitStrategies();
+  // Resume running trading strategies after load
+  const evaluators = new Map<StrategyType, EvaluateFn>([
+    ["dca", dcaEvaluate],
+    ["twap", twapEvaluate],
+    ["mean-reversion", meanReversionEvaluate],
+  ]);
+  resumeTradingStrategies(evaluators);
 });

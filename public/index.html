@@ -68,8 +68,57 @@
   }
   .topbar button:hover { color: var(--fg); }
 
-  /* Main area: scrollable output */
-  #output {
+  /* Tab bar */
+  .tabbar {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    padding: 0 16px;
+    font-size: 12px;
+  }
+  .tab {
+    padding: 6px 16px;
+    cursor: pointer;
+    color: var(--muted);
+    border-bottom: 2px solid transparent;
+    user-select: none;
+  }
+  .tab:hover { color: var(--fg); }
+  .tab.active {
+    color: var(--fg);
+    border-bottom-color: var(--fg);
+  }
+
+  /* Tab content */
+  .tab-content {
+    display: none;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+    min-height: 0;
+  }
+  .tab-content.active {
+    display: flex;
+  }
+
+  /* Monitor panel (per-tab) */
+  .tab-monitor {
+    flex-shrink: 0;
+    display: none;
+    border-bottom: 1px solid var(--border);
+    max-height: 50vh;
+    overflow-y: auto;
+  }
+  .tab-monitor.active { display: block; }
+  .tab-monitor .monitor-expanded + .monitor-expanded,
+  .tab-monitor .monitor-expanded + .monitor-collapsed,
+  .tab-monitor .monitor-collapsed + .monitor-expanded,
+  .tab-monitor .monitor-collapsed + .monitor-collapsed {
+    border-top: 1px solid var(--border);
+  }
+
+  /* Output (per-tab) */
+  .tab-output {
     flex: 1;
     overflow-y: auto;
     padding: 12px 16px;
@@ -77,28 +126,12 @@
     word-break: break-all;
     font-size: 13px;
   }
-  #output .line { margin-bottom: 2px; }
-  #output .cmd { color: var(--cyan); }
-  #output .ok { color: var(--green); }
-  #output .err { color: var(--red); }
-  #output .warn { color: var(--yellow); }
-  #output .dim { color: var(--muted); }
-
-  /* Monitor panel — fixed below topbar */
-  #monitor {
-    flex-shrink: 0;
-    display: none; /* hidden until watching */
-    border-bottom: 1px solid var(--border);
-    max-height: 50vh;
-    overflow-y: auto;
-  }
-  #monitor.active { display: block; }
-  #monitor .monitor-expanded + .monitor-expanded,
-  #monitor .monitor-expanded + .monitor-collapsed,
-  #monitor .monitor-collapsed + .monitor-expanded,
-  #monitor .monitor-collapsed + .monitor-collapsed {
-    border-top: 1px solid var(--border);
-  }
+  .tab-output .line { margin-bottom: 2px; }
+  .tab-output .cmd { color: var(--cyan); }
+  .tab-output .ok { color: var(--green); }
+  .tab-output .err { color: var(--red); }
+  .tab-output .warn { color: var(--yellow); }
+  .tab-output .dim { color: var(--muted); }
 
   /* Collapsed: single row */
   .monitor-collapsed {
@@ -142,6 +175,10 @@
   .monitor-expanded .token-name { font-size: 15px; }
   .monitor-expanded .countdown { font-size: 18px; letter-spacing: 1px; margin: 4px 0; }
   .collapse-hint { color: var(--dim); font-size: 11px; margin-left: auto; }
+  .strategy-btn { background: none; border: none; cursor: pointer; font-size: 13px; padding: 2px 6px; color: var(--muted); line-height: 1; }
+  .strategy-btn:hover { color: var(--fg); }
+  .strategy-btn.remove:hover { color: var(--red); }
+  .strategy-actions { margin-left: auto; display: flex; gap: 2px; align-items: center; }
   .progress-bar {
     height: 4px;
     background: var(--bar-bg);
@@ -288,10 +325,26 @@
   <button onclick="toggleTheme()" id="theme-toggle" title="Toggle theme">&#9790;</button>
 </div>
 
-<div id="monitor"></div>
-<div id="toast-container"></div>
+<div class="tabbar">
+  <div class="tab" data-tab="trade" onclick="switchTab('trade')">TRADE</div>
+  <div class="tab" data-tab="flow" onclick="switchTab('flow')">FLOW</div>
+  <div class="tab" data-tab="portfolio" onclick="switchTab('portfolio')">PORTFOLIO</div>
+</div>
 
-<div id="output"></div>
+<div class="tab-content" id="tab-trade">
+  <div id="monitor-trade" class="tab-monitor"></div>
+  <div id="output-trade" class="tab-output"></div>
+</div>
+<div class="tab-content" id="tab-flow">
+  <div id="monitor-flow" class="tab-monitor"></div>
+  <div id="output-flow" class="tab-output"></div>
+</div>
+<div class="tab-content" id="tab-portfolio">
+  <div id="monitor-portfolio" class="tab-monitor"></div>
+  <div id="output-portfolio" class="tab-output"></div>
+</div>
+
+<div id="toast-container"></div>
 
 <div class="inputbar">
   <span class="prompt">&gt;</span>
@@ -350,6 +403,9 @@ let agentState = { watching: null, status: 'idle', armedBid: null, lastResult: n
 let launchesCache = []; // cached from last `auctions` or boot
 let strategiesCache = []; // cached from last poll
 let exitStrategiesCache = []; // cached from last poll
+let tradingStrategiesCache = []; // cached from last poll
+let lastSuggestions = []; // last suggest command results for numeric selection
+let activeTab = localStorage.getItem('activeTab') || 'trade';
 
 function q96ToFdv(q96, info) {
   const floor = parseFloat(info.floorPrice || '0');
@@ -361,8 +417,55 @@ function q96ToFdv(q96, info) {
   return q96 * ((req / auction) * supply) / floor;
 }
 
-const $output = document.getElementById('output');
+// ─── DOM refs ───
+const $outputs = {
+  flow: document.getElementById('output-flow'),
+  trade: document.getElementById('output-trade'),
+  portfolio: document.getElementById('output-portfolio'),
+};
+const $monitors = {
+  flow: document.getElementById('monitor-flow'),
+  trade: document.getElementById('monitor-trade'),
+  portfolio: document.getElementById('monitor-portfolio'),
+};
 const $cli = document.getElementById('cli');
+
+// ─── Tab switching ───
+function switchTab(name) {
+  activeTab = name;
+  localStorage.setItem('activeTab', name);
+  document.querySelectorAll('.tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === name);
+  });
+  document.querySelectorAll('.tab-content').forEach(tc => {
+    tc.classList.toggle('active', tc.id === 'tab-' + name);
+  });
+  const $out = $outputs[name];
+  if ($out) $out.scrollTop = $out.scrollHeight;
+  $cli.focus();
+}
+
+// Initialize tab from localStorage
+switchTab(activeTab);
+
+// ─── Command routing ───
+const TAB_COMMANDS = {
+  flow: new Set(['auctions','ls','watch','unwatch','stop','arm','disarm','bid',
+    'strategy','strategies','cancel','exit','exits','exit-cancel',
+    'claim','claim-all','launch','info','price']),
+  trade: new Set(['trade','trades','trade-cancel','trade-remove','trade-pause','trade-resume','suggest']),
+  portfolio: new Set(['wallet','bids']),
+};
+const GLOBAL_COMMANDS = new Set(['help','status','clear']);
+const TAB_LABELS = { flow: 'Flow', trade: 'Trade', portfolio: 'Portfolio' };
+const TAB_KEYS = { trade: '1', flow: '2', portfolio: '3' };
+
+function commandTab(cmd) {
+  for (const [tab, cmds] of Object.entries(TAB_COMMANDS)) {
+    if (cmds.has(cmd)) return tab;
+  }
+  return null;
+}
 
 // ─── Resolve auction identifier (address, symbol, name, or #index) ───
 async function resolveAuction(input) {
@@ -395,23 +498,36 @@ function launchLabel(l) {
 
 // ─── Output helpers ───
 function print(text, cls) {
+  const $out = $outputs[activeTab];
   const div = document.createElement('div');
   div.className = 'line' + (cls ? ' ' + cls : '');
   div.textContent = text;
-  $output.appendChild(div);
-  $output.scrollTop = $output.scrollHeight;
+  $out.appendChild(div);
+  $out.scrollTop = $out.scrollHeight;
 }
 
 function printHtml(html) {
+  const $out = $outputs[activeTab];
   const div = document.createElement('div');
   div.className = 'line';
   div.innerHTML = html;
-  $output.appendChild(div);
-  $output.scrollTop = $output.scrollHeight;
+  $out.appendChild(div);
+  $out.scrollTop = $out.scrollHeight;
+}
+
+function printTo(tab, text, cls) {
+  const $out = $outputs[tab];
+  if (!$out) return;
+  const div = document.createElement('div');
+  div.className = 'line' + (cls ? ' ' + cls : '');
+  div.textContent = text;
+  $out.appendChild(div);
+  $out.scrollTop = $out.scrollHeight;
 }
 
 // ─── Monitor state (per auction) ───
 const monitorCollapsed = {}; // addr -> bool
+const collapsedStrategies = new Set(); // strategy id -> collapsed
 const monitorData = {};      // addr -> { info, bids }
 
 function toggleMonitor(addr) {
@@ -419,8 +535,41 @@ function toggleMonitor(addr) {
   renderAllMonitors();
 }
 
+function toggleStrategy(id) {
+  if (collapsedStrategies.has(id)) collapsedStrategies.delete(id);
+  else collapsedStrategies.add(id);
+  renderTradeMonitors();
+}
+
+async function removeStrategy(id, ev) {
+  ev.stopPropagation();
+  const s = tradingStrategiesCache.find(s => s.id === id);
+  const isActive = s && (s.status === 'running' || s.status === 'paused');
+  if (isActive && !confirm(`Cancel and remove ${s.type.toUpperCase()} ${s.tokenSymbol} (#${id})?`)) return;
+  try {
+    if (isActive) {
+      const cr = await fetch(`/api/trading-strategy/${id}/cancel`, { method: 'POST' });
+      const cd = await cr.json();
+      if (cd.error) throw new Error(cd.error);
+    }
+    const res = await fetch(`/api/trading-strategy/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    tradingStrategiesCache = tradingStrategiesCache.filter(s => s.id !== id);
+    renderTradeMonitors();
+  } catch (e) {
+    print('remove failed: ' + e.message, 'err');
+  }
+}
+
 function renderAllMonitors() {
-  const $mon = document.getElementById('monitor');
+  renderFlowMonitors();
+  renderTradeMonitors();
+  renderPortfolioMonitor();
+}
+
+function renderFlowMonitors() {
+  const $mon = $monitors.flow;
   const addrs = agentState.watching || [];
   if (addrs.length === 0) {
     $mon.classList.remove('active');
@@ -435,6 +584,243 @@ function renderAllMonitors() {
     html += renderOneMonitor(addr, d.info, d.bids, d.block);
   });
   $mon.innerHTML = html;
+}
+
+function renderTradeMonitors() {
+  const $mon = $monitors.trade;
+  const hasTrading = Array.isArray(tradingStrategiesCache) && tradingStrategiesCache.length > 0;
+  if (!hasTrading) {
+    $mon.classList.remove('active');
+    $mon.innerHTML = '';
+    return;
+  }
+  $mon.classList.add('active');
+  $mon.innerHTML = renderTradingStrategies();
+}
+
+function renderPortfolioMonitor() {
+  const $mon = $monitors.portfolio;
+  if (!Array.isArray(tradingStrategiesCache) || tradingStrategiesCache.length === 0) {
+    $mon.classList.remove('active');
+    $mon.innerHTML = '';
+    return;
+  }
+
+  let totalInvested = 0;
+  let totalValue = 0;
+  let totalRealized = 0;
+  let totalUnrealized = 0;
+  const tokens = [];
+  const allTrades = [];
+
+  tradingStrategiesCache.forEach(s => {
+    const lastPrice = s.priceHistory.length > 0 ? s.priceHistory[s.priceHistory.length - 1].price : 0;
+    const value = s.position.tokenBalance * lastPrice;
+    totalInvested += s.position.totalInvested;
+    totalValue += value;
+    totalRealized += s.pnl.realized;
+    totalUnrealized += s.pnl.unrealized;
+
+    tokens.push({
+      symbol: s.tokenSymbol,
+      balance: s.position.tokenBalance,
+      avgEntry: s.position.avgEntryPrice,
+      lastPrice,
+      value,
+      pnlTotal: s.pnl.realized + s.pnl.unrealized,
+      pnlPct: s.position.totalInvested > 0 ? ((s.pnl.realized + s.pnl.unrealized) / s.position.totalInvested * 100) : 0,
+    });
+
+    if (s.trades) {
+      s.trades.forEach(t => allTrades.push({ ...t, symbol: s.tokenSymbol }));
+    }
+  });
+
+  const totalPnl = totalRealized + totalUnrealized;
+  const totalPnlPct = totalInvested > 0 ? (totalPnl / totalInvested * 100) : 0;
+  const pnlColor = totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
+
+  let h = '<div class="monitor-expanded">';
+  h += '<div class="head"><span class="token-name">Portfolio Summary</span></div>';
+
+  h += '<div class="stats-row">';
+  h += `<span><span class="label">invested</span> ${fmtUsd(totalInvested)}</span>`;
+  h += `<span><span class="label">value</span> ${fmtUsd(totalValue)}</span>`;
+  h += `<span style="color:${pnlColor}"><span class="label">total pnl</span> ${totalPnl >= 0 ? '+' : ''}${fmtUsd(totalPnl)} (${totalPnlPct >= 0 ? '+' : ''}${totalPnlPct.toFixed(1)}%)</span>`;
+  h += `<span><span class="label">realized</span> ${fmtUsd(totalRealized)}</span>`;
+  h += '</div>';
+
+  // Per-token table
+  if (tokens.length > 0) {
+    h += '<table class="bids-table"><tr><th>token</th><th>balance</th><th>avg entry</th><th>price</th><th>value</th><th>pnl</th></tr>';
+    tokens.forEach(t => {
+      const tColor = t.pnlTotal >= 0 ? 'var(--green)' : 'var(--red)';
+      h += '<tr>';
+      h += `<td>${t.symbol}</td>`;
+      h += `<td>${fmtNum(t.balance)}</td>`;
+      h += `<td>$${t.avgEntry.toFixed(6)}</td>`;
+      h += `<td>${t.lastPrice > 0 ? '$' + t.lastPrice.toFixed(6) : '\u2014'}</td>`;
+      h += `<td>${fmtUsd(t.value)}</td>`;
+      h += `<td style="color:${tColor}">${t.pnlTotal >= 0 ? '+' : ''}${fmtUsd(t.pnlTotal)} (${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(1)}%)</td>`;
+      h += '</tr>';
+    });
+    h += '</table>';
+  }
+
+  // Recent trades (last 10 across all strategies)
+  allTrades.sort((a, b) => (b.time || b.timestamp || 0) - (a.time || a.timestamp || 0));
+  const recentTrades = allTrades.slice(0, 10);
+  if (recentTrades.length > 0) {
+    h += '<div style="margin-top:8px;font-size:11px;color:var(--muted)">Recent trades</div>';
+    h += '<table class="bids-table"><tr><th>time</th><th>token</th><th>side</th><th>amount</th><th>price</th></tr>';
+    recentTrades.forEach(t => {
+      const time = t.time || t.timestamp;
+      const ago = time ? fmtTimeAgo(Math.round((Date.now() - time) / 1000)) : '\u2014';
+      const sideColor = t.side === 'buy' ? 'var(--green)' : 'var(--red)';
+      h += '<tr>';
+      h += `<td>${ago}</td>`;
+      h += `<td>${t.symbol}</td>`;
+      h += `<td style="color:${sideColor}">${(t.side || '\u2014').toUpperCase()}</td>`;
+      h += `<td>${t.amountUsd ? fmtUsd(t.amountUsd) : t.amount ? fmtUsd(t.amount) : '\u2014'}</td>`;
+      h += `<td>${t.price ? '$' + t.price.toFixed(6) : '\u2014'}</td>`;
+      h += '</tr>';
+    });
+    h += '</table>';
+  }
+
+  h += '</div>';
+
+  $mon.classList.add('active');
+  $mon.innerHTML = h;
+}
+
+function renderTradingStrategies() {
+  let h = '';
+  tradingStrategiesCache.forEach(s => {
+    const statusColor = s.status === 'running' ? 'var(--green)' : s.status === 'paused' ? 'var(--yellow)' : 'var(--muted)';
+    const lastPrice = s.priceHistory.length > 0 ? s.priceHistory[s.priceHistory.length - 1].price : 0;
+    const posValue = s.position.tokenBalance * lastPrice;
+    const pnlTotal = s.pnl.realized + s.pnl.unrealized;
+    const pnlColor = pnlTotal >= 0 ? 'var(--green)' : 'var(--red)';
+    const pnlPct = s.position.totalInvested > 0 ? (pnlTotal / s.position.totalInvested * 100) : 0;
+    const eid = s.id.replace(/'/g, "\\'");
+    const collapsed = collapsedStrategies.has(s.id);
+
+    if (collapsed) {
+      h += `<div class="monitor-collapsed" onclick="toggleStrategy('${eid}')">`;
+      h += `<span class="status" style="color:${statusColor}">${s.status.toUpperCase()}</span>`;
+      h += `<span class="token">${s.type.toUpperCase()} ${s.tokenSymbol}</span>`;
+      h += `<span class="stat"><span class="label">#</span><span>${s.id}</span></span>`;
+      h += `<span style="color:${pnlColor}" class="stat"><span class="label">pnl </span><span>${pnlTotal >= 0 ? '+' : ''}${fmtUsd(pnlTotal)}</span></span>`;
+      h += `<button class="strategy-btn remove" onclick="removeStrategy('${eid}', event)" title="Remove strategy">&#10005;</button>`;
+      h += `<span class="expand">&#9660;</span>`;
+      h += `</div>`;
+      return;
+    }
+
+    h += `<div class="monitor-expanded" style="border-top:1px solid var(--border)">`;
+    h += `<div class="head" onclick="toggleStrategy('${eid}')">`;
+    h += `<span class="status" style="color:${statusColor}">${s.status.toUpperCase()}</span>`;
+    h += `<span class="token-name">${s.type.toUpperCase()} ${s.tokenSymbol}</span>`;
+    h += `<span style="color:var(--muted);font-size:11px">#${s.id}</span>`;
+    h += `<button class="strategy-btn remove" onclick="removeStrategy('${eid}', event)" title="Remove strategy">&#10005;</button>`;
+    h += `<span class="collapse-hint">&#9650;</span>`;
+    h += `</div>`;
+
+    h += `<div class="stats-row">`;
+    h += `<span><span class="label">position</span> ${fmtNum(s.position.tokenBalance)} ${s.tokenSymbol}</span>`;
+    h += `<span><span class="label">value</span> ${fmtUsd(posValue)}</span>`;
+    h += `<span><span class="label">avg entry</span> $${s.position.avgEntryPrice.toFixed(6)}</span>`;
+    if (lastPrice > 0) h += `<span><span class="label">price</span> $${lastPrice.toFixed(6)}</span>`;
+    h += `<span style="color:${pnlColor}"><span class="label">pnl</span> ${pnlTotal >= 0 ? '+' : ''}${fmtUsd(pnlTotal)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)</span>`;
+    h += `</div>`;
+
+    h += `<div class="stats-row">`;
+    h += `<span><span class="label">invested</span> ${fmtUsd(s.position.totalInvested)}</span>`;
+    h += `<span><span class="label">realized</span> ${fmtUsd(s.position.totalRealized)}</span>`;
+    h += `<span><span class="label">trades</span> ${s.trades.length}</span>`;
+    h += `<span style="color:var(--red)"><span class="label">stop-loss</span> ${s.riskLimits.stopLossPercent}%</span>`;
+    h += `</div>`;
+
+    // Sparkline from price history
+    if (s.priceHistory.length > 1) {
+      h += `<div style="font-size:11px;color:var(--muted);margin-top:4px;">`;
+      h += `<span class="label">price </span>${renderSparkline(s.priceHistory)}`;
+      h += `</div>`;
+    }
+
+    // Last 3 log entries
+    if (s.log && s.log.length > 0) {
+      const recent = s.log.slice(-3);
+      recent.forEach(l => {
+        const ago = Math.round((Date.now() - l.time) / 1000);
+        const logColor = l.type === 'error' ? 'var(--red)' : l.type === 'trade' ? 'var(--green)' : 'var(--muted)';
+        h += `<div style="font-size:11px;color:${logColor}">${l.message} (${fmtTimeAgo(ago)})</div>`;
+      });
+    }
+
+    h += `</div>`;
+  });
+  return h;
+}
+
+function fmtNum(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  if (n >= 1) return n.toFixed(2);
+  return n.toFixed(6);
+}
+
+function fmtTimeAgo(seconds) {
+  if (seconds < 60) return seconds + 's ago';
+  if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+  return Math.floor(seconds / 3600) + 'h ago';
+}
+
+function renderSparkline(priceHistory) {
+  const prices = priceHistory.slice(-40).map(p => p.price);
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  const range = max - min || 1;
+  const chars = '\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588';
+  return prices.map(p => {
+    const idx = Math.min(7, Math.floor(((p - min) / range) * 7));
+    return chars[idx];
+  }).join('');
+}
+
+function analyzeToken(history) {
+  const prices = history.map(p => p.price);
+  const n = prices.length;
+  const currentPrice = prices[n - 1];
+  const high = Math.max(...prices);
+  const low = Math.min(...prices);
+  const rangePct = low > 0 ? ((high - low) / low) * 100 : 0;
+
+  // 30s returns for volatility
+  const returns = [];
+  for (let i = 1; i < n; i++) {
+    if (prices[i - 1] > 0) returns.push((prices[i] - prices[i - 1]) / prices[i - 1]);
+  }
+  const mean = returns.reduce((a, b) => a + b, 0) / (returns.length || 1);
+  const variance = returns.reduce((a, r) => a + (r - mean) ** 2, 0) / (returns.length || 1);
+  const volatility = Math.sqrt(variance);
+  // Annualize to hourly: 120 intervals per hour (30s each)
+  const hourlyVolPct = volatility * Math.sqrt(120) * 100;
+
+  // Trend: avg of last 1h vs avg of last 4h
+  const pts1h = Math.min(120, n);
+  const pts4h = Math.min(480, n);
+  const avg1h = prices.slice(-pts1h).reduce((a, b) => a + b, 0) / pts1h;
+  const avg4h = prices.slice(-pts4h).reduce((a, b) => a + b, 0) / pts4h;
+  const trendPct = avg4h > 0 ? ((avg1h - avg4h) / avg4h) * 100 : 0;
+
+  // Support/resistance: last 2h (240 points)
+  const recent = prices.slice(-Math.min(240, n));
+  const support = Math.min(...recent);
+  const resistance = Math.max(...recent);
+
+  return { volatility, hourlyVolPct, trendPct, rangePct, high, low, currentPrice, support, resistance };
 }
 
 function renderOneMonitor(addr, info, bids, block) {
@@ -491,7 +877,7 @@ function renderOneMonitor(addr, info, bids, block) {
   const armedBids = agentState.armedBids || [];
   const armedBid = armedBids.find(b => b.auctionAddress === addr);
   const isArmed = !!armedBid;
-  const strategy = strategiesCache.find(s => s.auctionAddress === addr && (s.status === 'running' || s.status === 'waiting'));
+  const strategy = strategiesCache.find(s => s.auctionAddress === addr && (s.status === 'watching' || s.status === 'bidding' || s.status === 'waiting'));
 
   // Escaped addr for onclick
   const esc = addr.replace(/'/g, "\\'");
@@ -541,18 +927,32 @@ function renderOneMonitor(addr, info, bids, block) {
   h += `</div>`;
 
   if (strategy) {
+    const stratColor = strategy.status === 'bidding' ? 'var(--green)' : strategy.status === 'watching' ? 'var(--yellow)' : 'var(--muted)';
     h += `<div class="stats-row">`;
-    h += `<span style="color:var(--green)"><span class="label">strategy</span> ${strategy.status}</span>`;
-    h += `<span><span class="label">range</span> ${fmtUsd(strategy.minFdvUsd || 0)} – ${fmtUsd(strategy.maxFdvUsd || 0)}</span>`;
+    h += `<span style="color:${stratColor}"><span class="label">strategy</span> ${strategy.status.toUpperCase()}</span>`;
+    h += `<span><span class="label">range</span> ${fmtUsd(strategy.minFdvUsd || 0)} \u2013 ${fmtUsd(strategy.maxFdvUsd || 0)}</span>`;
     h += `<span><span class="label">amount</span> ${strategy.amount} USDC</span>`;
-    h += `<span><span class="label">bid fdv</span> ${fmtUsd(strategy.currentFdv)}</span>`;
-    if (strategy.impliedFdv) h += `<span><span class="label">market fdv</span> ${fmtUsd(strategy.impliedFdv)}</span>`;
+    if (strategy.impliedFdv) h += `<span><span class="label">clearing fdv</span> ${fmtUsd(strategy.impliedFdv)}</span>`;
     h += `<span><span class="label">bids placed</span> ${strategy.bidsPlaced}</span>`;
     if (strategy.exitProfile) h += `<span><span class="label">exit</span> ${strategy.exitProfile}</span>`;
+    // Show FDV trend during watching phase
+    if (strategy.status === 'watching' && strategy.fdvHistory && strategy.fdvHistory.length > 1) {
+      const first = strategy.fdvHistory[0];
+      const last = strategy.fdvHistory[strategy.fdvHistory.length - 1];
+      const trend = last > first ? '\u2191' : last < first ? '\u2193' : '\u2192';
+      h += `<span><span class="label">fdv trend</span> ${trend} ${fmtUsd(first)} \u2192 ${fmtUsd(last)}</span>`;
+    }
+    // Show bid window countdown during watching phase
+    if (strategy.status === 'watching' && status === 'LIVE') {
+      const bidWindowBlocks = Math.max(0, (endBlock - currentBlock) - 15);
+      if (bidWindowBlocks > 0) {
+        h += `<span style="color:var(--cyan)"><span class="label">bid window in</span> ${fmtTime(bidWindowBlocks * 2)}</span>`;
+      }
+    }
     if (strategy.log && strategy.log.length > 0) {
-      const last = strategy.log[strategy.log.length - 1];
-      const ago = Math.round((Date.now() - last.time) / 1000);
-      h += `<span><span class="label">last</span> ${last.message} (${ago}s ago)</span>`;
+      const lastLog = strategy.log[strategy.log.length - 1];
+      const ago = Math.round((Date.now() - lastLog.time) / 1000);
+      h += `<span><span class="label">last</span> ${lastLog.message} (${ago}s ago)</span>`;
     }
     h += `</div>`;
   }
@@ -575,7 +975,7 @@ function renderOneMonitor(addr, info, bids, block) {
       exitStrategy.tranches.forEach((t, i) => {
         const tColor = t.status === 'executed' ? 'var(--green)' : t.status === 'skipped' ? 'var(--dim)' : 'var(--muted)';
         let tText = `${t.pctToSell}% @ ${t.targetMultiple}x`;
-        if (t.status === 'executed') tText += ` → $${t.usdcReceived}`;
+        if (t.status === 'executed') tText += ` \u2192 $${t.usdcReceived}`;
         h += `<span style="color:${tColor}">${t.status === 'executed' ? '\u2713' : t.status === 'skipped' ? '\u2717' : '\u25CB'} ${tText}</span>`;
       });
       h += `</div>`;
@@ -585,14 +985,14 @@ function renderOneMonitor(addr, info, bids, block) {
   if (bidList.length > 0) {
     h += `<table class="bids-table"><tr><th>block</th><th>bidder</th><th>amount</th><th>max fdv</th></tr>`;
     bidList.slice(-8).reverse().forEach(b => {
-      const ba = b.owner || '—';
+      const ba = b.owner || '\u2014';
       const short = ba.length > 10 ? ba.slice(0, 6) + '..' + ba.slice(-4) : ba;
       const amtRaw = parseFloat(b.amountBid || '0');
-      const amt = amtRaw > 0 ? fmtUsd(amtRaw / 1e6) : '—';
+      const amt = amtRaw > 0 ? fmtUsd(amtRaw / 1e6) : '\u2014';
       const maxPriceQ96 = parseFloat(b.maxPrice || '0');
       const bidFdv = maxPriceQ96 > 0 ? q96ToFdv(maxPriceQ96, info) : null;
-      const blk = b.submittedAtBlock || '—';
-      h += `<tr><td>${blk}</td><td>${short}</td><td>${amt}</td><td>${bidFdv ? fmtUsd(bidFdv) : '—'}</td></tr>`;
+      const blk = b.submittedAtBlock || '\u2014';
+      h += `<tr><td>${blk}</td><td>${short}</td><td>${amt}</td><td>${bidFdv ? fmtUsd(bidFdv) : '\u2014'}</td></tr>`;
     });
     h += `</table>`;
   }
@@ -604,10 +1004,11 @@ function renderOneMonitor(addr, info, bids, block) {
 // For one-shot info command (renders into output, not the pinned monitor)
 function printMonitorToOutput(info, bids, block) {
   const html = renderOneMonitor('_oneshot', info, bids, block);
+  const $out = $outputs[activeTab];
   const div = document.createElement('div');
   div.innerHTML = html;
-  $output.appendChild(div);
-  $output.scrollTop = $output.scrollHeight;
+  $out.appendChild(div);
+  $out.scrollTop = $out.scrollHeight;
 }
 
 // ─── Formatting ───
@@ -656,19 +1057,22 @@ function stopPolling() {
 
 async function pollAll() {
   try {
-    const [agentRes, blockRes, stratRes, exitRes] = await Promise.all([
+    const [agentRes, blockRes, stratRes, exitRes, tradingRes] = await Promise.all([
       fetch('/api/agent'),
       fetch('/api/block'),
       fetch('/api/strategies'),
       fetch('/api/exit-strategies'),
+      fetch('/api/trading-strategies'),
     ]);
     agentState = await agentRes.json();
     const block = await blockRes.json();
     try { strategiesCache = await stratRes.json(); } catch { strategiesCache = []; }
     try { exitStrategiesCache = await exitRes.json(); } catch { exitStrategiesCache = []; }
+    try { tradingStrategiesCache = await tradingRes.json(); } catch { tradingStrategiesCache = []; }
     const addrs = agentState.watching || [];
 
-    if (addrs.length === 0) {
+    const hasActiveTrades = Array.isArray(tradingStrategiesCache) && tradingStrategiesCache.some(s => s.status === 'running' || s.status === 'paused');
+    if (addrs.length === 0 && !hasActiveTrades) {
       stopPolling();
       renderAllMonitors();
       return;
@@ -697,16 +1101,15 @@ async function pollAll() {
 }
 
 // ─── Keyboard shortcuts ───
-let helpVisible = false;
 document.addEventListener('keydown', (e) => {
   if (!e.metaKey && !e.ctrlKey) return;
   const key = e.key.toLowerCase();
   switch (key) {
-    case 'k': e.preventDefault(); $output.innerHTML = ''; helpVisible = false; break;
-    case 'l': e.preventDefault(); runCmd('auctions'); break;
+    case 'k': e.preventDefault(); $outputs[activeTab].innerHTML = ''; break;
+    case 'l': e.preventDefault(); switchTab('flow'); runCmd('auctions'); break;
     case 'j': e.preventDefault(); runCmd('status'); break;
-    case 'w': e.preventDefault(); runCmd('wallet'); break;
-    case 'b': e.preventDefault(); runCmd('bids'); break;
+    case 'w': e.preventDefault(); switchTab('portfolio'); runCmd('wallet'); break;
+    case 'b': e.preventDefault(); switchTab('portfolio'); runCmd('bids'); break;
     case 'm':
       e.preventDefault();
       const addrs = agentState.watching || [];
@@ -718,16 +1121,11 @@ document.addEventListener('keydown', (e) => {
       break;
     case '/':
       e.preventDefault();
-      if (helpVisible) {
-        // Remove the help block
-        const hb = document.getElementById('help-block');
-        if (hb) hb.remove();
-        helpVisible = false;
-      } else {
-        runCmd('help');
-        helpVisible = true;
-      }
+      runCmd('help');
       break;
+    case '1': e.preventDefault(); switchTab('trade'); break;
+    case '2': e.preventDefault(); switchTab('flow'); break;
+    case '3': e.preventDefault(); switchTab('portfolio'); break;
   }
 });
 
@@ -746,54 +1144,102 @@ async function runCmd(raw) {
   const parts = raw.split(/\s+/);
   const cmd = parts[0].toLowerCase();
 
+  // Numeric selection from last suggest results
+  const numSel = parseInt(raw);
+  if (lastSuggestions.length > 0 && !isNaN(numSel) && numSel >= 1 && numSel <= lastSuggestions.length && parts.length === 1) {
+    const selected = lastSuggestions[numSel - 1];
+    lastSuggestions = [];
+    print(`> ${selected.cmd}`, 'cmd');
+    await runCmd(selected.cmd);
+    return;
+  }
+
+  // Command routing: check if command belongs to a different tab
+  if (!GLOBAL_COMMANDS.has(cmd)) {
+    const cmdTab = commandTab(cmd);
+    if (cmdTab && cmdTab !== activeTab) {
+      print(`'${cmd}' is a ${TAB_LABELS[cmdTab]} command \u2014 switch with Cmd+${TAB_KEYS[cmdTab]}`, 'warn');
+      return;
+    }
+  }
+
   try {
     switch (cmd) {
       case 'help': {
-        const old = document.getElementById('help-block');
-        if (old) { old.remove(); helpVisible = false; break; }
+        const helpId = 'help-block-' + activeTab;
+        const old = document.getElementById(helpId);
+        if (old) { old.remove(); break; }
         const helpDiv = document.createElement('div');
-        helpDiv.id = 'help-block';
-        const lines = [
-          '',
-          '  auctions           list all auctions          Cmd+L',
-          '  watch <id>         watch auction (symbol, #, or addr)',
-          '  unwatch            stop watching',
-          '  strategy <id> <min> <max> <amt> [exit] [stop-loss]  bid strategy',
-          '  strategies         show active strategies',
-          '  cancel <id>        cancel a strategy',
-          '  arm <fdv> <amt>    schedule fixed bid for start',
-          '  bid <fdv> <amt>    bid now on watched auction',
-          '  info <id>          one-shot auction lookup',
-          '',
-          '  exit <id> [profile] [stop-loss]  start exit strategy',
-          '                       profiles: conservative, moderate, aggressive',
-          '                       custom: exit <id> 50@3x,50@5x',
-          '                       stop-loss: exit <id> moderate 0.5',
-          '  exits              list active exit strategies',
-          '  exit-cancel <id>   cancel exit strategy',
-          '  price <id>         check token price on Uniswap',
-          '',
-          '  launch <name> <symbol>  launch a new token',
-          '',
-          '  claim <id>         claim/exit a bid',
-          '  claim-all          claim all claimable bids',
-          '',
-          '  status             show agent state            Cmd+J',
-          '  bids               show your bid history       Cmd+B',
-          '  wallet             show wallet info            Cmd+W',
-          '  clear              clear output                Cmd+K',
-          '  help               this message                Cmd+/',
-          '',
-        ];
+        helpDiv.id = helpId;
+        let lines;
+        if (activeTab === 'flow') {
+          lines = [
+            '',
+            '  FLOW COMMANDS',
+            '  auctions           list all auctions          Cmd+L',
+            '  watch <id>         watch auction (symbol, #, or addr)',
+            '  unwatch            stop watching',
+            '  strategy <id> <min> <max> <amt> [exit] [stop-loss]  bid strategy',
+            '  strategies         show active strategies',
+            '  cancel <id>        cancel a strategy',
+            '  arm <fdv> <amt>    schedule fixed bid for start',
+            '  bid <fdv> <amt>    bid now on watched auction',
+            '  info <id>          one-shot auction lookup',
+            '',
+            '  exit <id> [profile] [stop-loss]  start exit strategy',
+            '                       profiles: conservative, moderate, aggressive',
+            '                       custom: exit <id> 50@3x,50@5x',
+            '                       stop-loss: exit <id> moderate 0.5',
+            '  exits              list active exit strategies',
+            '  exit-cancel <id>   cancel exit strategy',
+            '  price <id>         check token price on Uniswap',
+            '',
+            '  launch <name> <symbol>  launch a new token',
+            '',
+            '  claim <id>         claim/exit a bid',
+            '  claim-all          claim all claimable bids',
+          ];
+        } else if (activeTab === 'trade') {
+          lines = [
+            '',
+            '  TRADE COMMANDS',
+            '  trade dca <token> <amt> <interval> [budget] [sl%]',
+            '  trade twap <token> <total> <duration> <chunks> [sl%]',
+            '  trade mean-revert <token> <amt> <emaPeriod> <buyDip> <sellRip> [sl%]',
+            '  trades             list active trading strategies',
+            '  trade-cancel <id>  cancel trading strategy',
+            '  trade-remove <id>  remove finished strategy from monitor',
+            '  trade-pause <id>   pause trading strategy',
+            '  trade-resume <id>  resume trading strategy',
+            '  suggest [token]    analyze token price, recommend strategy',
+          ];
+        } else {
+          lines = [
+            '',
+            '  PORTFOLIO COMMANDS',
+            '  wallet             show wallet info            Cmd+W',
+            '  bids               show your bid history       Cmd+B',
+          ];
+        }
+        // Append global commands + tab shortcuts
+        lines.push('');
+        lines.push('  GLOBAL');
+        lines.push('  status             show agent state            Cmd+J');
+        lines.push('  clear              clear output                Cmd+K');
+        lines.push('  help               this message                Cmd+/');
+        lines.push('');
+        lines.push('  Cmd+1 Trade   Cmd+2 Flow   Cmd+3 Portfolio');
+        lines.push('');
+
         lines.forEach(l => {
           const d = document.createElement('div');
           d.className = 'line';
           d.textContent = l;
           helpDiv.appendChild(d);
         });
-        $output.appendChild(helpDiv);
-        $output.scrollTop = $output.scrollHeight;
-        helpVisible = true;
+        const $out = $outputs[activeTab];
+        $out.appendChild(helpDiv);
+        $out.scrollTop = $out.scrollHeight;
         break;
       }
 
@@ -837,8 +1283,9 @@ async function runCmd(raw) {
         aucLine('');
         aucLine('use: watch <symbol>, watch <#>, or watch <addr>  |  auctions to collapse', 'dim');
         aucLine('');
-        $output.appendChild(aucDiv);
-        $output.scrollTop = $output.scrollHeight;
+        const $out = $outputs[activeTab];
+        $out.appendChild(aucDiv);
+        $out.scrollTop = $out.scrollHeight;
         break;
       }
 
@@ -884,7 +1331,8 @@ async function runCmd(raw) {
           Object.keys(monitorData).forEach(k => delete monitorData[k]);
           print('stopped watching all', 'dim');
         }
-        if (agentState.watching.length === 0) stopPolling();
+        const hasActiveTrades = Array.isArray(tradingStrategiesCache) && tradingStrategiesCache.some(s => s.status === 'running' || s.status === 'paused');
+        if (agentState.watching.length === 0 && !hasActiveTrades) stopPolling();
         renderAllMonitors();
         break;
       }
@@ -914,7 +1362,7 @@ async function runCmd(raw) {
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         const match = launchesCache.find(l => l.auction === auctionAddr);
-        print(`armed ${match ? match.tokenSymbol : shortAddr(auctionAddr)} — ${amt} USDC @ ${fmtUsd(Number(fdv))} FDV`, 'ok');
+        print(`armed ${match ? match.tokenSymbol : shortAddr(auctionAddr)} \u2014 ${amt} USDC @ ${fmtUsd(Number(fdv))} FDV`, 'ok');
         break;
       }
 
@@ -959,7 +1407,7 @@ async function runCmd(raw) {
         if (!addr) { print(`could not find auction: ${id}`, 'err'); break; }
         const match = launchesCache.find(l => l.auction === addr);
         print(`starting strategy on ${match ? match.tokenSymbol : shortAddr(addr)}...`, 'dim');
-        print(`  FDV range: ${fmtUsd(Number(minFdv))} → ${fmtUsd(Number(maxFdv))}`, 'dim');
+        print(`  FDV range: ${fmtUsd(Number(minFdv))} \u2192 ${fmtUsd(Number(maxFdv))}`, 'dim');
         print(`  Amount: ${amt} USDC`, 'dim');
         if (exitProf) print(`  Exit: ${exitProf}`, 'dim');
         if (stratStopLoss != null) print(`  Stop-loss: ${stratStopLoss}x`, 'dim');
@@ -978,7 +1426,7 @@ async function runCmd(raw) {
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
-        let okMsg = `strategy active — agent will bid low and adjust up to ${fmtUsd(Number(maxFdv))} FDV`;
+        let okMsg = `strategy active \u2014 agent will watch, then bid in final ~30s (max ${fmtUsd(Number(maxFdv))} FDV)`;
         if (exitProf) okMsg += ` | exit: ${exitProf}`;
         if (stratStopLoss != null) okMsg += ` | stop-loss: ${stratStopLoss}x`;
         print(okMsg, 'ok');
@@ -996,7 +1444,7 @@ async function runCmd(raw) {
         strats.forEach(s => {
           const match = launchesCache.find(l => l.auction === s.auctionAddress);
           const name = match ? match.tokenSymbol : shortAddr(s.auctionAddress);
-          print(`  ${name}  ${s.status}  fdv: ${fmtUsd(s.currentFdv)}  bids: ${s.bidsPlaced}  total: ${s.totalBids}`, s.status === 'running' ? 'ok' : 'dim');
+          print(`  ${name}  ${s.status}  fdv: ${fmtUsd(s.currentFdv)}  bids: ${s.bidsPlaced}  total: ${s.totalBids}`, (s.status === 'watching' || s.status === 'bidding') ? 'ok' : 'dim');
           // Show last 3 log entries
           s.log.slice(-3).forEach(l => {
             const ago = Math.round((Date.now() - l.time) / 1000);
@@ -1049,7 +1497,7 @@ async function runCmd(raw) {
         });
         const exitData = await exitRes.json();
         if (exitData.error) throw new Error(exitData.error);
-        let exitOkMsg = `exit strategy active — entry FDV: ${fmtUsd(exitData.entryFdv)}`;
+        let exitOkMsg = `exit strategy active \u2014 entry FDV: ${fmtUsd(exitData.entryFdv)}`;
         if (exitStopLoss != null) exitOkMsg += ` | stop-loss: ${exitStopLoss}x`;
         print(exitOkMsg, 'ok');
         if (!pollInterval) startPolling();
@@ -1074,7 +1522,7 @@ async function runCmd(raw) {
           e.tranches.forEach(t => {
             const icon = t.status === 'executed' ? '\u2713' : t.status === 'skipped' ? '\u2717' : '\u25CB';
             let line = `    ${icon} ${t.pctToSell}% @ ${t.targetMultiple}x`;
-            if (t.status === 'executed') line += ` → $${t.usdcReceived} USDC`;
+            if (t.status === 'executed') line += ` \u2192 $${t.usdcReceived} USDC`;
             print(line, t.status === 'executed' ? 'ok' : 'dim');
           });
           // Last log
@@ -1272,10 +1720,10 @@ async function runCmd(raw) {
           break;
         }
         bids.forEach(b => {
-          const addr = shortAddr(b.auctionAddress || b.auction || '—');
-          const amt = b.amount || b.amountRaw || '—';
-          const fdv = b.maxFdvUsd || b.maxFdv || '—';
-          const st = b.status || '—';
+          const addr = shortAddr(b.auctionAddress || b.auction || '\u2014');
+          const amt = b.amount || b.amountRaw || '\u2014';
+          const fdv = b.maxFdvUsd || b.maxFdv || '\u2014';
+          const st = b.status || '\u2014';
           print(`  ${addr}  ${amt} USDC  FDV ${fdv}  ${st}`);
         });
         break;
@@ -1290,12 +1738,473 @@ async function runCmd(raw) {
         break;
       }
 
+      case 'trade': {
+        const subCmd = parts[1]?.toLowerCase();
+        if (!subCmd) { print('usage: trade dca|twap|mean-revert <token> ...', 'err'); break; }
+
+        const tokenInput = parts[2];
+        if (!tokenInput) { print(`usage: trade ${subCmd} <token> ...`, 'err'); break; }
+
+        // Resolve token address — server searches strategies, launches, and on-chain
+        let tradeTokenAddress = tokenInput;
+        if (!tokenInput.startsWith('0x')) {
+          try {
+            const resolveRes = await fetch(`/api/token/resolve/${encodeURIComponent(tokenInput)}`);
+            if (!resolveRes.ok) { print(`could not resolve token: ${tokenInput}`, 'err'); break; }
+            const resolved = await resolveRes.json();
+            tradeTokenAddress = resolved.token;
+          } catch { print(`could not resolve token: ${tokenInput}`, 'err'); break; }
+        }
+
+        if (subCmd === 'dca') {
+          const amt = parts[3], interval = parts[4];
+          if (!amt || !interval) { print('usage: trade dca <token> <amount> <interval> [budget] [stopLoss%]', 'err'); break; }
+          const intMatch = interval.match(/^(\d+)(m|h|d)$/i);
+          if (!intMatch) { print(`invalid interval: ${interval} (use 1h, 4h, 12h, 1d, 30m)`, 'err'); break; }
+          const ival = parseInt(intMatch[1]);
+          const iunit = intMatch[2].toLowerCase();
+          const intervalMs = iunit === 'm' ? ival * 60000 : iunit === 'h' ? ival * 3600000 : ival * 86400000;
+          const body = { type: 'dca', tokenAddress: tradeTokenAddress, params: { amountPerBuy: Number(amt), intervalMs }, riskLimits: {} };
+          if (parts[5]) body.params.totalBudget = Number(parts[5]);
+          if (parts[6]) body.riskLimits.stopLossPercent = Number(parts[6]);
+          print(`starting DCA...`, 'dim');
+          const res = await fetch('/api/trading-strategy', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          print(`DCA started on ${data.tokenSymbol} \u2014 ${data.id}`, 'ok');
+          print(`  $${amt} every ${interval}${parts[5] ? ' | budget: $' + parts[5] : ''}`, 'dim');
+          if (!pollInterval) startPolling();
+        } else if (subCmd === 'twap') {
+          const total = parts[3], dur = parts[4], chunks = parts[5];
+          if (!total || !dur || !chunks) { print('usage: trade twap <token> <total> <duration> <chunks> [stopLoss%]', 'err'); break; }
+          const durMatch = dur.match(/^(\d+)(m|h|d)$/i);
+          if (!durMatch) { print(`invalid duration: ${dur}`, 'err'); break; }
+          const dval = parseInt(durMatch[1]);
+          const dunit = durMatch[2].toLowerCase();
+          const durationMs = dunit === 'm' ? dval * 60000 : dunit === 'h' ? dval * 3600000 : dval * 86400000;
+          const body = { type: 'twap', tokenAddress: tradeTokenAddress, params: { totalAmount: Number(total), durationMs, chunks: Number(chunks) }, riskLimits: {} };
+          if (parts[6]) body.riskLimits.stopLossPercent = Number(parts[6]);
+          print(`starting TWAP...`, 'dim');
+          const res = await fetch('/api/trading-strategy', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          print(`TWAP started on ${data.tokenSymbol} \u2014 ${data.id}`, 'ok');
+          print(`  $${total} over ${dur} in ${chunks} chunks ($${(Number(total) / Number(chunks)).toFixed(2)} each)`, 'dim');
+          if (!pollInterval) startPolling();
+        } else if (subCmd === 'mean-revert') {
+          const amt = parts[3], emaPeriod = parts[4], buyDip = parts[5], sellRip = parts[6];
+          if (!amt || !emaPeriod || !buyDip || !sellRip) { print('usage: trade mean-revert <token> <amt> <emaPeriod> <buyDip%> <sellRip%> [stopLoss%]', 'err'); break; }
+          const body = { type: 'mean-reversion', tokenAddress: tradeTokenAddress, params: { amountPerTrade: Number(amt), emaPeriodMinutes: Number(emaPeriod), buyThresholdPct: Number(buyDip), sellThresholdPct: Number(sellRip) }, riskLimits: {} };
+          if (parts[7]) body.riskLimits.stopLossPercent = Number(parts[7]);
+          print(`starting mean-reversion...`, 'dim');
+          const res = await fetch('/api/trading-strategy', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          print(`Mean-Reversion started on ${data.tokenSymbol} \u2014 ${data.id}`, 'ok');
+          print(`  $${amt}/trade, ${emaPeriod}min EMA, buy at -${buyDip}%, sell at +${sellRip}%`, 'dim');
+          if (!pollInterval) startPolling();
+        } else {
+          print(`unknown trade sub-command: ${subCmd}`, 'err');
+        }
+        break;
+      }
+
+      case 'trades': {
+        const res = await fetch('/api/trading-strategies');
+        const strats = await res.json();
+        if (!Array.isArray(strats) || strats.length === 0) {
+          print('no active trading strategies', 'dim');
+          break;
+        }
+        strats.forEach(s => {
+          const lastPrice = s.priceHistory.length > 0 ? s.priceHistory[s.priceHistory.length - 1].price : 0;
+          const posValue = s.position.tokenBalance * lastPrice;
+          const pnlTotal = s.pnl.realized + s.pnl.unrealized;
+          const pnlCls = pnlTotal >= 0 ? 'ok' : 'err';
+          const pnlPct = s.position.totalInvested > 0 ? (pnlTotal / s.position.totalInvested * 100) : 0;
+          print(`  ${s.type.toUpperCase()} ${s.tokenSymbol}  ${s.status}  id: ${s.id}`, s.status === 'running' ? 'ok' : 'dim');
+          print(`    pos: ${fmtNum(s.position.tokenBalance)} ($${posValue.toFixed(2)}) | avg: $${s.position.avgEntryPrice.toFixed(6)} | pnl: ${pnlTotal >= 0 ? '+' : ''}${fmtUsd(pnlTotal)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)`, pnlCls);
+          print(`    invested: ${fmtUsd(s.position.totalInvested)} | realized: ${fmtUsd(s.position.totalRealized)} | trades: ${s.trades.length}`, 'dim');
+          if (s.log && s.log.length > 0) {
+            const last = s.log[s.log.length - 1];
+            const ago = Math.round((Date.now() - last.time) / 1000);
+            print(`    ${last.message} (${ago}s ago)`, last.type === 'error' ? 'err' : last.type === 'trade' ? 'ok' : 'dim');
+          }
+        });
+        break;
+      }
+
+      case 'trade-cancel': {
+        const id = parts[1];
+        if (!id) { print('usage: trade-cancel <id>', 'err'); break; }
+        const res = await fetch(`/api/trading-strategy/${id}/cancel`, { method: 'POST' });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        print(`cancelled trading strategy ${id}`, 'dim');
+        break;
+      }
+
+      case 'trade-remove': {
+        const id = parts[1];
+        if (!id) { print('usage: trade-remove <id>', 'err'); break; }
+        const res2 = await fetch(`/api/trading-strategy/${id}`, { method: 'DELETE' });
+        const data2 = await res2.json();
+        if (data2.error) throw new Error(data2.error);
+        print(`removed trading strategy ${id}`, 'dim');
+        break;
+      }
+
+      case 'trade-pause': {
+        const id = parts[1];
+        if (!id) { print('usage: trade-pause <id>', 'err'); break; }
+        const res = await fetch(`/api/trading-strategy/${id}/pause`, { method: 'POST' });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        print(`paused trading strategy ${id}`, 'dim');
+        break;
+      }
+
+      case 'trade-resume': {
+        const id = parts[1];
+        if (!id) { print('usage: trade-resume <id>', 'err'); break; }
+        const res = await fetch(`/api/trading-strategy/${id}/resume`, { method: 'POST' });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        print(`resumed trading strategy ${id}`, 'ok');
+        break;
+      }
+
+      case 'suggest': {
+        const sugInput = parts.slice(1).join(' ');
+
+        // ── suggest <token> — single-token analysis ──
+        if (sugInput) {
+          print('analyzing token...', 'dim');
+
+          // Resolve token — server searches strategies, launches, and on-chain
+          const cachedStrats = Array.isArray(tradingStrategiesCache) ? tradingStrategiesCache : [];
+          let sugTokenAddr = null;
+          let sugSymbol = null;
+
+          try {
+            const resolveRes = await fetch(`/api/token/resolve/${encodeURIComponent(sugInput)}`);
+            if (resolveRes.ok) {
+              const resolved = await resolveRes.json();
+              sugTokenAddr = resolved.token;
+              sugSymbol = resolved.symbol;
+            }
+          } catch {}
+
+          // Fallback: raw address
+          if (!sugTokenAddr && sugInput.startsWith('0x') && sugInput.length > 10) {
+            sugTokenAddr = sugInput;
+            sugSymbol = shortAddr(sugInput);
+          }
+
+          if (!sugTokenAddr) {
+            print(`could not find token: ${sugInput}`, 'err');
+            print('  use a token symbol, name, or 0x address', 'dim');
+            break;
+          }
+
+          // Fetch price + wallet in parallel
+          const [sugPriceRes, sugWalletRes] = await Promise.all([
+            fetch(`/api/token/${sugTokenAddr}/price`),
+            fetch('/api/wallet'),
+          ]);
+          const sugPriceData = await sugPriceRes.json();
+          const sugWallet = await sugWalletRes.json();
+          if (sugWallet.error) throw new Error(sugWallet.error);
+          const usdcBal = parseFloat(sugWallet.usdcBalance);
+
+          // Search tradingStrategiesCache for price history
+          const stratWithHistory = cachedStrats.find(s =>
+            s.tokenSymbol === sugSymbol || s.tokenAddress === sugTokenAddr
+          );
+          const history = stratWithHistory?.priceHistory || [];
+
+          // Use API price, fall back to last history price
+          const sugPrice = sugPriceData.priceUsd || (history.length > 0 ? history[history.length - 1].price : 0);
+
+          if (!sugPrice) {
+            print('');
+            print(`  ${sugSymbol}`, '');
+            print('  could not fetch price — token may not have liquidity yet', 'warn');
+            print('');
+            break;
+          }
+
+          print('');
+          print(`  ${sugSymbol}  $${sugPrice.toFixed(sugPrice >= 1 ? 2 : 6)}`);
+          print('');
+
+          if (history.length > 30) {
+            const analysis = analyzeToken(history);
+            const span = history.length * 30; // seconds
+            const spanH = (span / 3600).toFixed(1);
+
+            print(`  ANALYSIS (${history.length} price points, ${spanH}h)`);
+            const trendDir = analysis.trendPct > 3 ? 'bullish' : analysis.trendPct < -3 ? 'bearish' : 'ranging';
+            const trendSign = analysis.trendPct >= 0 ? '+' : '';
+            print(`  trend     ${trendSign}${analysis.trendPct.toFixed(1)}% (1h vs 4h avg — ${trendDir})`);
+            const volLabel = analysis.hourlyVolPct > 8 ? 'high' : analysis.hourlyVolPct > 3 ? 'moderate' : 'low';
+            print(`  vol       ${analysis.hourlyVolPct.toFixed(1)}%/hr (${volLabel})`);
+            print(`  range     $${analysis.low.toFixed(analysis.low >= 1 ? 2 : 6)} — $${analysis.high.toFixed(analysis.high >= 1 ? 2 : 6)} (${analysis.rangePct.toFixed(1)}%)`);
+            print(`  support   ~$${analysis.support.toFixed(analysis.support >= 1 ? 2 : 6)}   resistance  ~$${analysis.resistance.toFixed(analysis.resistance >= 1 ? 2 : 6)}`);
+            print('');
+
+            // Position sizing
+            const baseSize = Math.min(usdcBal * 0.2, 500);
+            const isHighVol = analysis.hourlyVolPct > 8;
+            const isDowntrend = analysis.trendPct < -3;
+            const isUptrend = analysis.trendPct > 3;
+            const isRanging = !isUptrend && !isDowntrend;
+            const sizeMultiplier = (isHighVol || isDowntrend) ? 0.5 : 1;
+            const size = Math.max(5, Math.floor(baseSize * sizeMultiplier));
+
+            // Stop-loss
+            let stopLoss = 25;
+            if (isHighVol) stopLoss += 5;
+            if (isDowntrend) stopLoss -= 10;
+
+            // Mean-reversion bands
+            const bands = Math.max(2, Math.min(15, analysis.hourlyVolPct * 1.5));
+
+            // EMA period
+            const emaPeriod = isHighVol ? 30 : (analysis.hourlyVolPct > 3 ? 60 : 120);
+
+            const suggestions = [];
+
+            if (isUptrend && !isHighVol) {
+              // Uptrend + low/moderate vol → DCA with larger amounts
+              const budget = size * 6;
+              const interval = '2h';
+              const sl = Math.min(stopLoss + 10, 35);
+              suggestions.push({
+                label: `DCA into ${sugSymbol} — ride the uptrend`,
+                detail: `$${size} every ${interval}, $${budget} budget, ${sl}% stop-loss`,
+                cmd: `trade dca ${sugTokenAddr} ${size} ${interval} ${budget} ${sl}`,
+              });
+            }
+
+            if (isUptrend && isHighVol) {
+              // Uptrend + high vol → TWAP spread over 4h
+              const total = size * 4;
+              const chunks = Math.max(4, Math.min(12, Math.floor(total / 10)));
+              const sl = Math.min(stopLoss, 30);
+              suggestions.push({
+                label: `TWAP buy ${sugSymbol} — spread the uptrend entry`,
+                detail: `$${total} over 4h in ${chunks} chunks, ${sl}% stop-loss`,
+                cmd: `trade twap ${sugTokenAddr} ${total} 4h ${chunks} ${sl}`,
+              });
+            }
+
+            if (isRanging) {
+              // Ranging → Mean-reversion
+              const bandPct = bands.toFixed(1);
+              suggestions.push({
+                label: `Mean-reversion ${sugSymbol} — trade the ${analysis.rangePct.toFixed(0)}% range`,
+                detail: `$${size}/trade, ${emaPeriod}min EMA, buy at -${bandPct}%, sell at +${bandPct}%, ${stopLoss}% stop`,
+                cmd: `trade mean-revert ${sugTokenAddr} ${size} ${emaPeriod} ${bandPct} ${bandPct} ${stopLoss}`,
+              });
+            }
+
+            if (isDowntrend) {
+              // Downtrend → small DCA only
+              const budget = size * 4;
+              const sl = stopLoss;
+              suggestions.push({
+                label: `Small DCA into ${sugSymbol} — cautious accumulation`,
+                detail: `$${size} every 4h, $${budget} budget, ${sl}% stop-loss`,
+                cmd: `trade dca ${sugTokenAddr} ${size} 4h ${budget} ${sl}`,
+              });
+            }
+
+            if (isHighVol) {
+              // Very high vol → mean-reversion with wide bands
+              const wideBands = Math.max(2, Math.min(15, analysis.hourlyVolPct * 1.5)).toFixed(1);
+              const mrSize = Math.max(5, Math.floor(size * 0.7));
+              suggestions.push({
+                label: `Mean-reversion ${sugSymbol} — exploit high volatility`,
+                detail: `$${mrSize}/trade, 30min EMA, buy at -${wideBands}%, sell at +${wideBands}%, ${stopLoss}% stop`,
+                cmd: `trade mean-revert ${sugTokenAddr} ${mrSize} 30 ${wideBands} ${wideBands} ${stopLoss}`,
+              });
+            }
+
+            // Always offer a DCA if not already suggested
+            if (!isUptrend && !isDowntrend) {
+              const dcaBudget = size * 6;
+              suggestions.push({
+                label: `DCA into ${sugSymbol} — steady accumulation`,
+                detail: `$${size} every 2h, $${dcaBudget} budget, ${stopLoss}% stop-loss`,
+                cmd: `trade dca ${sugTokenAddr} ${size} 2h ${dcaBudget} ${stopLoss}`,
+              });
+            }
+
+            lastSuggestions = suggestions;
+            print('  RECOMMENDATIONS', 'ok');
+            print('');
+            suggestions.forEach((s, i) => {
+              print(`  ${i + 1}. ${s.label}`, 'ok');
+              print(`     ${s.detail}`, 'dim');
+              printHtml(`     <span style="color:var(--cyan);cursor:pointer" onclick="document.getElementById('cli').value='${s.cmd}';document.getElementById('cli').focus()">&gt; ${s.cmd}</span>`);
+              print('');
+            });
+            print('  type a number to run, or click a command to load it', 'dim');
+            print('');
+          } else {
+            // No history
+            print('  no price history (start a strategy to begin tracking)', 'dim');
+            print('');
+            print('  RECOMMENDATION — conservative entry', 'ok');
+            print('');
+            const dcaSize = Math.max(5, Math.min(Math.floor(usdcBal * 0.1), 25));
+            const dcaBudget = dcaSize * 8;
+            const dcaCmd = `trade dca ${sugTokenAddr} ${dcaSize} 4h ${dcaBudget} 20`;
+            lastSuggestions = [{ cmd: dcaCmd }];
+            print(`  1. DCA into ${sugSymbol}`, 'ok');
+            print(`     $${dcaSize} every 4h, $${dcaBudget} budget, 20% stop-loss`, 'dim');
+            printHtml(`     <span style="color:var(--cyan);cursor:pointer" onclick="document.getElementById('cli').value='${dcaCmd}';document.getElementById('cli').focus()">&gt; ${dcaCmd}</span>`);
+            print('');
+            print('  type 1 to run, or click the command to load it', 'dim');
+            print('');
+          }
+          break;
+        }
+
+        // ── suggest (no args) — scan all graduated tokens ──
+        print('analyzing wallet and market...', 'dim');
+        const [sugWalletRes, sugLaunchesRes, sugTradesRes] = await Promise.all([
+          fetch('/api/wallet'),
+          fetch('/api/launches'),
+          fetch('/api/trading-strategies'),
+        ]);
+        const sugWallet = await sugWalletRes.json();
+        if (sugWallet.error) throw new Error(sugWallet.error);
+        const sugLaunches = await sugLaunchesRes.json();
+        launchesCache = sugLaunches;
+        let sugTrades = [];
+        try { sugTrades = await sugTradesRes.json(); } catch {}
+        if (!Array.isArray(sugTrades)) sugTrades = [];
+
+        const usdcBalAll = parseFloat(sugWallet.usdcBalance);
+        print('');
+        print(`  wallet: ${fmtUsd(usdcBalAll)} USDC  ${parseFloat(sugWallet.ethBalance).toFixed(4)} ETH`);
+        print('');
+
+        // Find graduated tokens and fetch prices
+        const graduated = sugLaunches.filter(l => l.isGraduated);
+        if (graduated.length === 0) {
+          print('  no graduated tokens available to trade', 'dim');
+          break;
+        }
+
+        // Fetch prices in parallel
+        const priceResults = await Promise.all(graduated.map(async l => {
+          try {
+            const r = await fetch(`/api/token/${l.token}/price`);
+            const d = await r.json();
+            return { ...l, price: d.priceUsd || 0, error: d.error };
+          } catch { return { ...l, price: 0, error: true }; }
+        }));
+        const tradeable = priceResults.filter(t => t.price > 0 && !t.error);
+
+        if (tradeable.length === 0) {
+          print('  no tokens with active liquidity found', 'dim');
+          break;
+        }
+
+        // Show available tokens
+        print('  tradeable tokens:', 'dim');
+        tradeable.forEach(t => {
+          print(`    ${t.tokenSymbol.padEnd(10)} $${t.price.toFixed(6)}`);
+        });
+        print('');
+
+        // Check which tokens already have active strategies
+        const activeSymbols = new Set(sugTrades.filter(s => s.status === 'running' || s.status === 'paused').map(s => s.tokenSymbol));
+
+        if (usdcBalAll < 1) {
+          print('  insufficient USDC for trading', 'warn');
+          break;
+        }
+
+        // Generate suggestions
+        const suggestions = [];
+        const maxPerStrategy = Math.min(usdcBalAll * 0.25, 500); // max 25% of wallet or $500
+        const minTrade = 5;
+
+        tradeable.forEach(t => {
+          const sym = t.tokenSymbol;
+          const hasPosition = activeSymbols.has(sym);
+
+          if (!hasPosition && usdcBalAll >= 20) {
+            // New token: suggest DCA for gradual entry
+            const budget = Math.min(maxPerStrategy, Math.floor(usdcBalAll * 0.2));
+            const perBuy = Math.max(minTrade, Math.floor(budget / 8));
+            suggestions.push({
+              type: 'dca',
+              label: `DCA into ${sym}`,
+              reason: 'gradual entry, reduces timing risk',
+              cmd: `trade dca ${sym} ${perBuy} 4h ${budget} 30`,
+              detail: `$${perBuy} every 4h, $${budget} budget, 30% stop-loss`,
+            });
+          }
+
+          if (!hasPosition && usdcBalAll >= 50) {
+            // TWAP for larger one-time allocation
+            const total = Math.min(maxPerStrategy, Math.floor(usdcBalAll * 0.15));
+            const chunks = Math.max(4, Math.min(12, Math.floor(total / 10)));
+            suggestions.push({
+              type: 'twap',
+              label: `TWAP buy ${sym}`,
+              reason: 'spread a buy over time to reduce slippage',
+              cmd: `trade twap ${sym} ${total} 2h ${chunks} 25`,
+              detail: `$${total} over 2h in ${chunks} chunks, 25% stop-loss`,
+            });
+          }
+
+          // Mean-reversion works with or without existing position
+          if (usdcBalAll >= 20) {
+            const perTrade = Math.max(minTrade, Math.floor(maxPerStrategy / 10));
+            suggestions.push({
+              type: 'mean-revert',
+              label: `Mean-revert ${sym}`,
+              reason: hasPosition ? 'already holding, trade the range' : 'buy dips, sell rips around EMA',
+              cmd: `trade mean-revert ${sym} ${perTrade} 60 5 5 30`,
+              detail: `$${perTrade}/trade, 60min EMA, buy at -5%, sell at +5%, 30% stop-loss`,
+            });
+          }
+        });
+
+        if (suggestions.length === 0) {
+          print('  no suggestions — balance too low or all tokens covered', 'dim');
+          break;
+        }
+
+        // Show top suggestions (limit to avoid wall of text)
+        const shown = suggestions.slice(0, 6);
+        lastSuggestions = shown;
+        print('  SUGGESTIONS', 'ok');
+        print('');
+        shown.forEach((s, i) => {
+          print(`  ${i + 1}. ${s.label}`, 'ok');
+          print(`     ${s.reason}`, 'dim');
+          print(`     ${s.detail}`, 'dim');
+          printHtml(`     <span style="color:var(--cyan);cursor:pointer" onclick="document.getElementById('cli').value='${s.cmd}';document.getElementById('cli').focus()">&gt; ${s.cmd}</span>`);
+          print('');
+        });
+        print('  type a number to run, or click a command to load it', 'dim');
+        print('');
+        break;
+      }
+
       case 'clear':
-        $output.innerHTML = '';
+        $outputs[activeTab].innerHTML = '';
         break;
 
       default:
-        print(`unknown command: ${cmd} — type help`, 'err');
+        print(`unknown command: ${cmd} \u2014 type help`, 'err');
     }
   } catch (e) {
     print(e.message, 'err');
@@ -1374,7 +2283,7 @@ function checkReadinessAlerts() {
 
     toast.innerHTML = `
       <button class="toast-close" onclick="dismissToast('${alert.auctionAddress}','${alert.stage}')">\u00D7</button>
-      <div class="toast-title">${tokenLabel} — Auction in ${timeLabel}</div>
+      <div class="toast-title">${tokenLabel} \u2014 Auction in ${timeLabel}</div>
       <div class="${usdcCls}">${checks.usdc.ok ? '\u2713' : '\u2717'} USDC: $${checks.usdc.balance.toFixed(2)} (need $${checks.usdc.needed.toFixed(2)})</div>
       <div class="${ethCls}">${checks.eth.ok ? '\u2713' : '\u2717'} ETH: ${checks.eth.balance.toFixed(4)} (gas)</div>
       <div class="${configCls}">${checks.config.ok ? '\u2713' : '\u2717'} ${checks.config.description}</div>
@@ -1387,8 +2296,8 @@ function checkReadinessAlerts() {
 
     // Browser notification
     if (Notification.permission === 'granted') {
-      new Notification(`${tokenLabel} — Auction in ${timeLabel}`, {
-        body: allGood ? 'Ready to go.' : 'Action needed — check wallet.',
+      new Notification(`${tokenLabel} \u2014 Auction in ${timeLabel}`, {
+        body: allGood ? 'Ready to go.' : 'Action needed \u2014 check wallet.',
       });
     } else if (Notification.permission !== 'denied' && !notifPermissionAsked) {
       notifPermissionAsked = true;
@@ -1436,25 +2345,47 @@ async function boot() {
     launchesCache = await launchesRes.json();
   } catch {}
 
-  print('terminal.flow.bid', 'dim');
-  print('');
+  // Check for active trading strategies
+  try {
+    const tradingRes = await fetch('/api/trading-strategies');
+    tradingStrategiesCache = await tradingRes.json();
+  } catch { tradingStrategiesCache = []; }
+  const runningTrades = Array.isArray(tradingStrategiesCache) ? tradingStrategiesCache.filter(s => s.status === 'running' || s.status === 'paused') : [];
 
   const watching = agentState.watching || [];
-  if (watching.length > 0) {
+
+  // Auto-select tab based on activity
+  if (watching.length > 0 && runningTrades.length === 0) {
+    switchTab('flow');
+  } else {
+    switchTab('trade');
+  }
+
+  printTo('flow', 'terminal.flow.bid', 'dim');
+  printTo('flow', '');
+
+  if (watching.length > 0 || runningTrades.length > 0) {
     watching.forEach(addr => {
       const match = launchesCache.find(l => l.auction === addr);
-      print(`resuming watch on ${match ? launchLabel(match) : shortAddr(addr)}`, 'ok');
+      printTo('flow', `resuming watch on ${match ? launchLabel(match) : shortAddr(addr)}`, 'ok');
     });
     if (agentState.status === 'armed' && agentState.armedBids?.length) {
       agentState.armedBids.forEach(ab => {
         const m = launchesCache.find(l => l.auction === ab.auctionAddress);
-        print(`agent armed: ${m ? m.tokenSymbol : shortAddr(ab.auctionAddress)} — ${ab.amount} USDC @ ${fmtUsd(ab.maxFdvUsd)} FDV`, 'warn');
+        printTo('flow', `agent armed: ${m ? m.tokenSymbol : shortAddr(ab.auctionAddress)} \u2014 ${ab.amount} USDC @ ${fmtUsd(ab.maxFdvUsd)} FDV`, 'warn');
       });
     }
+    runningTrades.forEach(s => {
+      printTo('trade', `resuming ${s.type} strategy on ${s.tokenSymbol} (${s.id})`, 'ok');
+    });
     startPolling();
   } else {
-    // Auto-show auctions on cold start so user sees available launches
-    await runCmd('auctions');
+    // Preload auctions into flow tab without switching
+    try {
+      const lRes = await fetch('/api/launches');
+      const launches = await lRes.json();
+      launchesCache = launches;
+    } catch {}
   }
 }
 
